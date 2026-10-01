@@ -1,0 +1,25 @@
+[Unit]
+Description=Nagios Management Portal (background worker: perf sampling, notifications)
+After=network.target mariadb.service nagios-management.service
+Wants=mariadb.service
+
+[Service]
+Type=simple
+User=nagmgmt
+Group=nagmgmt
+EnvironmentFile=/etc/nagios-management/app.env
+WorkingDirectory=/opt/nagios-management/backend
+ExecStart=/opt/nagios-management/venv/bin/python -m nmp.worker
+Restart=on-failure
+RestartSec=10
+UMask=0027
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=full
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target

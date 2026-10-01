@@ -1,0 +1,122 @@
+#!/usr/bin/python3 -I
+"""Register (or unregister) the portal's managed directory in nagios.cfg.
+
+Used ONLY by the installer / uninstaller (not allowed through sudoers).
+
+Usage: nagios-register-managed register   [--dedupe] [--no-reload]
+       nagios-register-managed unregister [--no-reload]
+
+Flow: BACKUP nagios.cfg -> build new copy -> VALIDATE copy (nagios -v as nagios)
+      -> replace -> VALIDATE live -> RELOAD -> VERIFY.  Restores on any failure.
+"""
+import os, shutil, sys, time
+from pathlib import Path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from nmp_priv.common import (Lock, Logger, PipelineError, create_backup, emit, ids, load_conf, parse_verify_output,
+                             reload_nagios, reload_and_verify, run_nagios_verify, chown_safe, _lock_file_pid)
+
+MARK = "# Nagios Management Portal - generated objects (do not edit files in this directory by hand)"
+
+
+def build(lines, managed, register, dedupe):
+    out, seen, removed = [], set(), []
+    for ln in lines:
+        s = ln.strip()
+        key = s.replace(" ", "") if (s.startswith("cfg_dir=") or s.startswith("cfg_file=")) else None
+        if key and dedupe:
+            if key in seen:
+                removed.append(s)
+                continue
+            seen.add(key)
+        if not register and (s == MARK or (s.startswith("cfg_dir=") and s.split("=", 1)[1].strip().rstrip("/") == managed)):
+            removed.append(s)
+            continue
+        out.append(ln)
+    present = any(l.strip().startswith("cfg_dir=") and l.strip().split("=", 1)[1].strip().rstrip("/") == managed for l in out)
+    added = []
+    if register and not present:
+        out += ["", MARK, f"cfg_dir={managed}"]
+        added.append(f"cfg_dir={managed}")
+    return out, removed, added
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] not in ("register", "unregister"):
+        emit({"ok": False, "error": __doc__}, 2)
+    register = args[0] == "register"
+    dedupe = "--dedupe" in args
+    do_reload = "--no-reload" not in args
+    conf = load_conf()
+    log = Logger(conf)
+    cfg = Path(conf["nagios_cfg"])
+    managed = conf["managed_dir"].rstrip("/")
+    created: list = []
+    try:
+        with Lock(conf):
+            nag_uid, _, gid = ids(conf)
+            if register:
+                for sub in ("", "hosts", "services", "hostgroups", "commands", "templates", "contacts"):
+                    d = Path(managed) / sub
+                    if not d.exists():
+                        created.append(d)
+                    d.mkdir(parents=True, exist_ok=True)
+                    os.chmod(d, 0o750)
+                    chown_safe(d, 0, gid)
+                sd = Path(conf["secrets_dir"])
+                if not sd.exists():
+                    created.append(sd)
+                sd.mkdir(parents=True, exist_ok=True)
+                os.chmod(sd, 0o500)
+                chown_safe(sd, nag_uid, 0)
+            original = cfg.read_text(encoding="utf-8")
+            lines, removed, added = build(original.splitlines(), managed, register, dedupe)
+            new_text = "\n".join(lines) + "\n"
+            if new_text == original or (not removed and not added):
+                emit({"ok": True, "changed": False, "removed": removed, "added": added, "steps": log.steps}, 0)
+            backup = create_backup(conf, "install" if register else "uninstall", None, [], log)
+            work = Path(conf["work_dir"]); work.mkdir(parents=True, exist_ok=True)
+            tmp = work / "nagios.cfg.candidate"
+            tmp.write_text(new_text, encoding="utf-8")
+            os.chmod(tmp, 0o640); chown_safe(tmp, 0, gid)
+            rc, out = run_nagios_verify(conf, str(tmp))
+            parsed = parse_verify_output(out, {str(tmp): str(cfg)})
+            if rc != 0 or parsed["errors"]:
+                log.step("validate", "failed", out[-500:])
+                tmp.unlink(missing_ok=True)
+                raise PipelineError("new nagios.cfg failed validation - nothing changed", validation=parsed, output=out)
+            log.step("validate", "ok")
+            st = cfg.stat()
+            keep = cfg.with_name(".nagios.cfg.nmp-prev")
+            shutil.copy2(cfg, keep)
+            os.chmod(tmp, st.st_mode & 0o7777); chown_safe(tmp, st.st_uid, st.st_gid)
+            os.replace(tmp, cfg)
+            log.step("install", "ok", f"removed={removed} added={added}")
+            try:
+                rc, out = run_nagios_verify(conf, str(cfg))
+                if rc != 0:
+                    raise PipelineError("live validation failed after replacing nagios.cfg", output=out)
+                if do_reload and _lock_file_pid(conf):
+                    reload_and_verify(conf, [], log)
+            except Exception as exc:
+                os.replace(keep, cfg)
+                log.step("restore-previous", "ok", str(exc)[:300])
+                if do_reload and _lock_file_pid(conf):
+                    reload_nagios(conf, log)
+                raise
+            keep.unlink(missing_ok=True)
+        emit({"ok": True, "changed": True, "removed": removed, "added": added, "backup": backup["name"],
+              "steps": log.steps}, 0)
+    except PipelineError as exc:
+        # do not leave empty directories behind when nothing was registered
+        for d in reversed(created):
+            try:
+                d.rmdir()
+            except OSError:
+                pass
+        emit({"ok": False, "error": str(exc), **{k: v for k, v in exc.extra.items() if k != "result"},
+              "steps": log.steps}, 1)
+
+
+if __name__ == "__main__":
+    main()

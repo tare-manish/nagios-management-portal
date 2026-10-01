@@ -1,0 +1,36 @@
+#!/usr/bin/python3 -I
+"""Report Nagios daemon status and validate the LIVE configuration (read-only).
+
+Usage: nagios-status-check
+"""
+import os, subprocess, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from nmp_priv.common import (PipelineError, _lock_file_pid, _status_program_start, emit, load_conf,
+                             parse_verify_output, run_nagios_verify)
+
+
+def main() -> None:
+    try:
+        conf = load_conf()
+        out = {"ok": True}
+        out["pid"] = _lock_file_pid(conf)
+        out["program_start"] = _status_program_start(conf)
+        if conf.get("reload_method") == "systemctl":
+            st = subprocess.run(["/usr/bin/systemctl", "is-active", conf["nagios_service"]], capture_output=True,
+                                text=True, env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"})
+            out["service_state"] = st.stdout.strip()
+        else:
+            out["service_state"] = "active" if out["pid"] else "inactive"
+        rc, text = run_nagios_verify(conf, conf["nagios_cfg"])
+        parsed = parse_verify_output(text)
+        out["config_valid"] = rc == 0 and not parsed["errors"]
+        out["errors"] = parsed["errors"]
+        out["warnings"] = parsed["warnings"]
+        out["counts"] = parsed["counts"]
+        emit(out, 0)
+    except PipelineError as exc:
+        emit({"ok": False, "error": str(exc)}, 1)
+
+
+if __name__ == "__main__":
+    main()

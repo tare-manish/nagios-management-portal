@@ -1,0 +1,6 @@
+# Nagios Management Portal - restricted privileges for the portal service account.
+# The portal may run ONLY these root-owned helper scripts. Each script accepts a
+# single strictly validated argument (numeric version id, backup name, reason
+# keyword) and never executes caller-supplied commands or paths.
+# Compatible with sudo and sudo-rs (Ubuntu 26.04 default). Validate with: visudo -cf <file>
+nagmgmt ALL=(root) NOPASSWD: /opt/nagios-management/privileged/sbin/nagios-config-validate, /opt/nagios-management/privileged/sbin/nagios-config-apply, /opt/nagios-management/privileged/sbin/nagios-config-backup, /opt/nagios-management/privileged/sbin/nagios-config-rollback, /opt/nagios-management/privileged/sbin/nagios-status-check, /opt/nagios-management/privileged/sbin/nagios-config-backup-delete

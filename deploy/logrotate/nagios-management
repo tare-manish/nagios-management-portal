@@ -1,0 +1,13 @@
+/var/log/nagios-management/*.log {
+    weekly
+    rotate 26
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 nagmgmt nagmgmt
+    sharedscripts
+    postrotate
+        systemctl try-reload-or-restart nagios-management.service nagios-management-worker.service >/dev/null 2>&1 || true
+    endscript
+}

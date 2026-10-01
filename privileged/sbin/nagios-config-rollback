@@ -1,0 +1,73 @@
+#!/usr/bin/python3 -I
+"""Emergency file-level restore of a configuration backup.
+
+Usage: nagios-config-rollback <backup-name>
+Restores the managed directory (and any manually maintained object files
+recorded in the backup) through the same VALIDATE -> BACKUP -> INSTALL ->
+RELOAD -> VERIFY pipeline. Agent secrets are kept as currently installed.
+For normal rollbacks use the portal (Configuration Versions > Rollback),
+which restores the database state and regenerates the configuration.
+"""
+import hashlib, json, os, shutil, sys, tarfile, tempfile
+from pathlib import Path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from nmp_priv.common import (BACKUP_RE, Lock, Logger, PipelineError, apply_stage, emit, load_conf,
+                             sha256_file)
+
+
+def main() -> None:
+    if len(sys.argv) != 2 or not BACKUP_RE.match(sys.argv[1]):
+        emit({"ok": False, "error": "usage: nagios-config-rollback <backup-name>"}, 2)
+    name = sys.argv[1]
+    conf = load_conf()
+    log = Logger(conf)
+    work = None
+    try:
+        with Lock(conf):
+            tar_path = Path(conf["backup_dir"]) / f"{name}.tar.gz"
+            if tar_path.is_symlink() or not tar_path.is_file():
+                raise PipelineError("backup not found")
+            Path(conf["work_dir"]).mkdir(parents=True, exist_ok=True)
+            work = Path(tempfile.mkdtemp(prefix="restore-", dir=conf["work_dir"]))
+            with tarfile.open(tar_path, "r:gz") as tar:
+                tar.extractall(work, filter="data")
+            meta = json.loads((work / "backup-meta.json").read_text())
+            stage = work / "stage"
+            (stage / "managed").mkdir(parents=True)
+            if (work / "managed").is_dir():
+                shutil.rmtree(stage / "managed")
+                shutil.copytree(work / "managed", stage / "managed", symlinks=False)
+            files = {}
+            for f in sorted((stage / "managed").rglob("*")):
+                if f.is_symlink():
+                    raise PipelineError("symlink in backup")
+                if f.is_file():
+                    files[str(f.relative_to(stage / "managed"))] = sha256_file(f)
+            overrides = []
+            (stage / "overrides").mkdir()
+            for i, item in enumerate(meta.get("legacy", [])):
+                target = Path(item["target"])
+                src = work / item["arcname"]
+                if not target.is_file() or not src.is_file():
+                    continue
+                if sha256_file(target) != sha256_file(src):
+                    dst = stage / "overrides" / f"{i:04d}.cfg"
+                    shutil.copyfile(src, dst)
+                    overrides.append({"target": str(target), "file": dst.name, "sha256": sha256_file(dst),
+                                      "sha256_before": sha256_file(target)})
+            manifest = {"version": None, "files": files, "secrets": {}, "overrides": overrides,
+                        "keep_secrets": True, "expected_hosts": []}
+            log.step("start", "ok", f"restore backup {name}")
+            res = apply_stage(conf, stage, manifest, log, "restore", "pre-restore", None)
+        emit({"ok": True, "restored": name, **res, "steps": log.steps}, 0)
+    except PipelineError as exc:
+        extra = dict(exc.extra)
+        result = extra.pop("result", {}) or {}
+        emit({"ok": False, "error": str(exc), **result, **extra, "steps": log.steps}, 1)
+    finally:
+        if work is not None:
+            shutil.rmtree(work, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    main()

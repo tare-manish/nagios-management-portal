@@ -1,0 +1,29 @@
+[Unit]
+Description=Nagios Management Portal (API)
+After=network.target mariadb.service
+Wants=mariadb.service
+
+[Service]
+Type=simple
+User=nagmgmt
+Group=nagmgmt
+EnvironmentFile=/etc/nagios-management/app.env
+WorkingDirectory=/opt/nagios-management/backend
+ExecStart=/opt/nagios-management/venv/bin/uvicorn nmp.main:app --host 127.0.0.1 --port @PORT@ --workers 2 --proxy-headers --forwarded-allow-ips 127.0.0.1 --no-server-header
+Restart=on-failure
+RestartSec=5
+UMask=0027
+# Hardening. NoNewPrivileges is intentionally NOT set: the service must be able to run
+# the whitelisted privileged helpers through sudo (see /etc/sudoers.d/nagios-management).
+PrivateTmp=yes
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=no
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

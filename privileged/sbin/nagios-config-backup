@@ -1,0 +1,25 @@
+#!/usr/bin/python3 -I
+"""Create a backup of the managed Nagios configuration.
+
+Usage: nagios-config-backup <reason>     (reason: [a-z0-9-]{1,40})
+"""
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from nmp_priv.common import Lock, Logger, PipelineError, create_backup, emit, load_conf
+
+
+def main() -> None:
+    if len(sys.argv) != 2:
+        emit({"ok": False, "error": "usage: nagios-config-backup <reason>"}, 2)
+    try:
+        conf = load_conf()
+        log = Logger(conf)
+        with Lock(conf):
+            meta = create_backup(conf, sys.argv[1], None, [], log)
+        emit({"ok": True, "backup": meta, "steps": log.steps}, 0)
+    except PipelineError as exc:
+        emit({"ok": False, "error": str(exc)}, 1)
+
+
+if __name__ == "__main__":
+    main()

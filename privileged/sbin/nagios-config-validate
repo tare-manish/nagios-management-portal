@@ -1,0 +1,29 @@
+#!/usr/bin/python3 -I
+"""Validate a staged configuration version with `nagios -v` (as the nagios user).
+
+Usage: nagios-config-validate <version-id>
+Never modifies live configuration. Prints a JSON result.
+"""
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from nmp_priv.common import (Lock, Logger, PipelineError, emit, load_conf, load_manifest, stage_path,
+                             validate_stage)
+
+
+def main() -> None:
+    if len(sys.argv) != 2:
+        emit({"ok": False, "error": "usage: nagios-config-validate <version-id>"}, 2)
+    try:
+        conf = load_conf()
+        log = Logger(conf)
+        with Lock(conf):
+            stage = stage_path(conf, sys.argv[1])
+            manifest = load_manifest(stage)
+            res = validate_stage(conf, stage, manifest, log, f"v{sys.argv[1]}")
+        emit({"ok": res["ok"], "validation": res, "steps": log.steps}, 0 if res["ok"] else 1)
+    except PipelineError as exc:
+        emit({"ok": False, "error": str(exc), **exc.extra}, 1)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,27 @@
+#!/usr/bin/python3 -I
+"""Delete one portal configuration backup (Super Admin data cleanup).
+
+Usage: nagios-config-backup-delete <backup-name>   (YYYYMMDD-HHMMSS-<reason>[-vN])
+Refuses installer/upgrade backups, the newest 5 portal backups and anything
+younger than 24 hours. Never touches the live Nagios configuration.
+"""
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from nmp_priv.common import Lock, Logger, PipelineError, delete_backup, emit, load_conf
+
+
+def main() -> None:
+    if len(sys.argv) != 2:
+        emit({"ok": False, "error": "usage: nagios-config-backup-delete <backup-name>"}, 2)
+    try:
+        conf = load_conf()
+        log = Logger(conf)
+        with Lock(conf):
+            meta = delete_backup(conf, sys.argv[1], log)
+        emit({"ok": True, "deleted": meta, "steps": log.steps}, 0)
+    except PipelineError as exc:
+        emit({"ok": False, "error": str(exc)}, 1)
+
+
+if __name__ == "__main__":
+    main()

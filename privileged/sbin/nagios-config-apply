@@ -1,0 +1,40 @@
+#!/usr/bin/python3 -I
+"""Apply a staged configuration version.
+
+Usage: nagios-config-apply <version-id>
+BACKUP -> VALIDATE -> INSTALL -> VALIDATE LIVE -> RELOAD -> VERIFY.
+Any failure restores the previous configuration. Prints a JSON result.
+"""
+import os, shutil, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from nmp_priv.common import (Lock, Logger, PipelineError, apply_stage, emit, load_conf, load_manifest,
+                             stage_path)
+
+
+def main() -> None:
+    if len(sys.argv) != 2:
+        emit({"ok": False, "error": "usage: nagios-config-apply <version-id>"}, 2)
+    conf = None
+    stage = None
+    log = None
+    try:
+        conf = load_conf()
+        log = Logger(conf)
+        with Lock(conf):
+            stage = stage_path(conf, sys.argv[1])
+            manifest = load_manifest(stage)
+            log.step("start", "ok", f"apply version {sys.argv[1]}")
+            res = apply_stage(conf, stage, manifest, log, f"v{sys.argv[1]}", "pre-apply", sys.argv[1])
+        emit({"ok": True, **res, "steps": log.steps}, 0)
+    except PipelineError as exc:
+        extra = dict(exc.extra)
+        result = extra.pop("result", {}) or {}
+        emit({"ok": False, "error": str(exc), **result, **extra, "steps": log.steps if log else []}, 1)
+    finally:
+        # plaintext secrets never stay in the staging area
+        if stage is not None:
+            shutil.rmtree(stage / "secrets", ignore_errors=True)
+
+
+if __name__ == "__main__":
+    main()
