@@ -9,14 +9,22 @@
 
 ## Roles
 
-| Role | Can |
-|---|---|
-| Super Admin | Everything, including users, roles, system settings and data cleanup |
-| Administrator | Servers, services, templates, groups, contacts, validate/apply/rollback, import, backups, notifications, reports, audit |
-| Operator | View everything, acknowledge problems, schedule downtime, re-check, test connections |
-| Viewer | Read-only dashboards, monitoring, inventory, reports |
+| Role | Sees | Can |
+|---|---|---|
+| Super Admin | **Every company and every location** by default, including servers without a company and hosts defined only in Nagios files | Everything: companies, locations, users, roles, settings, shared configuration (templates, catalog, commands, contacts, host groups, notification channels and rules), rollback, emergency restore, import, backups, data cleanup |
+| Administrator | **Only servers of the companies assigned to them** (one or several), optionally only at some sites | Add, edit, disable and delete servers of their companies; validate and apply when every pending change belongs to their companies |
+| Operator | Only their companies | Acknowledge problems, schedule downtime, re-check, test connections |
+| Viewer | Only their companies | Read-only dashboards, monitoring, inventory, reports |
 
-Custom roles can be created under **Administration → Roles** from any combination of the permissions (data cleanup is reserved for Super Admin).
+Custom roles can be created under **Administration → Roles**. Permissions marked *Super Admin only* can never be added to another role.
+
+## Companies and locations
+- **Administration → Companies** (Super Admin only): add any number of group companies (name + short code, e.g. *Acme Pharma Ltd / ACME*). Companies are retired, never deleted.
+- **Administration → Locations** (Super Admin only): the sites (Daman, Vapi, Pune, Surat, Indore, Bhopal, Other are created on upgrade; add more any time).
+- **Administration → Users** (Super Admin): tick the **companies** each user may monitor - one for an in-house IT team, several for a multi-company administrator. Optionally tick **sites** to limit them further (e.g. *Company A and Company B, Daman only*); with no sites ticked they see their companies everywhere. A user with no company sees no servers.
+- Users see the names of their own companies only. The company filter and *Servers by company* chart appear when a user has more than one company; Super Admin always sees all companies.
+- **Server form**: choose the *Company* (required for everyone except Super Admin; only your own companies are offered) and the *Location (site)*. The old free-text location is kept as *Rack / room*. Servers without a company are visible to Super Admin only.
+- **Applying configuration**: Nagios applies all pending changes at once. A company-scoped Administrator can apply only when every pending change belongs to their own companies; otherwise *Pending changes* shows how many belong to others and a Super Admin applies them.
 
 ## Dashboard
 **Host health** and **Service health** lead the page: the share of hosts up / services OK as a large figure, and a status bar showing problems first (down, unreachable, critical, warning, unknown, pending) then healthy. Every state has an icon, label, count and percentage; click one to open the filtered list. Below that: infrastructure summary (total, up, down, warning, unknown, unreachable), service summary (OK, warning, critical, unknown), 30-day availability, top problems, recent events (host and service failures, recoveries and configuration changes) and inventory by environment. Click a tile to open the filtered list. The page refreshes every 30 seconds.

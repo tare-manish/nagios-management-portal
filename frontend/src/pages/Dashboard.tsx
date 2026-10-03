@@ -1,4 +1,6 @@
-import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { useAuth } from "../lib/auth";
 import { Link, useNavigate } from "react-router-dom";
 import { AlertTriangle, CheckCircle2, HelpCircle, Server, XCircle, Activity, Network } from "lucide-react";
 import { api } from "../lib/api";
@@ -29,7 +31,16 @@ function ProblemTable({ rows, host }: { rows: any[]; host?: boolean }) {
 
 export default function Dashboard() {
   const nav = useNavigate();
-  const q = useQuery({ queryKey: ["dashboard"], queryFn: () => api.get("/api/dashboard"), refetchInterval: 30_000 });
+  const { user } = useAuth();
+  const isSuper = !!user?.is_super;
+  const [company, setCompany] = useState("");
+  const [location, setLocation] = useState("");
+  const q = useQuery({ queryKey: ["dashboard", company, location], queryFn: () => api.get("/api/dashboard", { company_id: company, location_id: location }),
+    refetchInterval: 30_000, placeholderData: keepPreviousData });
+  const companies = useQuery({ queryKey: ["companies"], queryFn: () => api.get("/api/companies") });
+  const cos: any[] = companies.data?.data ?? [];
+  const multiCo = isSuper || cos.length > 1;
+  const locations = useQuery({ queryKey: ["locations"], queryFn: () => api.get("/api/locations") });
   if (q.isLoading) return <Loading />;
   if (q.error) return <ErrorBox error={q.error} />;
   const d = q.data!.data;
@@ -39,6 +50,17 @@ export default function Dashboard() {
   return (
     <div className="stack">
       <PageHeader title="Dashboard" subtitle={<>Live state from Nagios{d.nagios.program_start && <> - Nagios running since {fmtDate(d.nagios.program_start)}</>} - refreshes every 30 s</>} />
+      <div className="toolbar" style={{ marginBottom: 0 }}>
+        {multiCo ? <select className="input" aria-label="Company" value={company} onChange={(e) => setCompany(e.target.value)}>
+          <option value="">{isSuper ? "All companies" : "All my companies"}</option>{cos.map((c: any) => <option key={c.id} value={c.id}>{c.name}</option>)}{isSuper && <option value="-1">No company</option>}</select>
+          : cos.length === 1 && <span className="badge outline">Company: {cos[0].name}</span>}
+        {(isSuper || (locations.data?.data ?? []).length > 1) ? <select className="input" aria-label="Location" value={location} onChange={(e) => setLocation(e.target.value)}>
+          <option value="">{isSuper ? "All locations" : "All my locations"}</option>{(locations.data?.data ?? []).map((l: any) => <option key={l.id} value={l.id}>{l.name}</option>)}{isSuper && <option value="-1">Not assigned</option>}</select>
+          : (locations.data?.data ?? []).length === 1 && <span className="badge outline">Location: {locations.data!.data[0].name}</span>}
+        {!isSuper && companies.isSuccess && cos.length === 0 && <Alert kind="warning">No company is assigned to your account, so no servers are shown. Ask a Super Admin to assign your companies.</Alert>}
+        {(company || location) && <button className="btn sm ghost" onClick={() => { setCompany(""); setLocation(""); }}>Clear filters</button>}
+        {q.isPlaceholderData && <span className="faint small">Loading...</span>}
+      </div>
       {d.nagios.status_error && <Alert kind="error">Nagios status is not available: {d.nagios.status_error}</Alert>}
       {d.pending_changes > 0 && <Alert kind="warning">{d.pending_changes} configuration change(s) are saved but not yet applied to Nagios. <Link to="/config/pending">Review and apply</Link></Alert>}
 
@@ -89,6 +111,17 @@ export default function Dashboard() {
           <Kpi label="Unknown" icon={<HelpCircle size={14} color="var(--unknown)" />} value={s.UNKNOWN} color="var(--unknown)" onClick={() => nav("/monitoring/services?state=UNKNOWN")} />
           <Kpi label="Availability (30 days)" value={d.availability_30d != null ? `${d.availability_30d.toFixed(2)}%` : "-"} sub="average host availability" color="var(--series-1)" onClick={() => nav("/reports/availability")} />
         </div>
+      </div>
+
+      <div className={`grid ${multiCo ? "grid-2" : ""}`}>
+        {multiCo && d.inventory.by_company && <Card title="Servers by company" actions={<span className="faint small">click to filter</span>}>
+          <RankBars rows={d.inventory.by_company.map((c: any) => ({ key: c.id, label: c.name, sub: c.problems ? `${c.problems} with problems` : "no problems", value: c.total, tone: c.problems ? "critical" as const : "series" as const }))}
+            onClickRow={(r) => setCompany(String(r.key))} empty="No servers" />
+        </Card>}
+        <Card title="Servers by location" actions={<span className="faint small">click to filter</span>}>
+          <RankBars rows={(d.inventory.by_location ?? []).map((c: any) => ({ key: c.id, label: c.name, sub: c.problems ? `${c.problems} with problems` : "no problems", value: c.total, tone: c.problems ? "critical" as const : "series" as const }))}
+            onClickRow={(r) => setLocation(String(r.key))} empty="No servers" />
+        </Card>
       </div>
 
       <div className="grid grid-2">

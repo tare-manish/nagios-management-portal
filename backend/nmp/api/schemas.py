@@ -92,6 +92,8 @@ class ServerIn(BaseModel):
     group_ids: list[int] = Field(default_factory=list)
     contact_group_ids: list[int] = Field(default_factory=list)
     template_id: Optional[int] = None
+    location_id: Optional[int] = None   # site; required for location-scoped users
+    company_id: Optional[int] = None    # Super Admin only (ignored for other users)
     check_interval: int = Field(5, ge=1, le=1440)
     retry_interval: int = Field(1, ge=1, le=1440)
     max_check_attempts: int = Field(5, ge=1, le=20)

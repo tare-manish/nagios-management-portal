@@ -24,8 +24,9 @@ export function PendingPage() {
   return (
     <div className="stack">
       <PageHeader title="Pending changes" subtitle="Saved in the portal but not yet applied to Nagios. Applying runs: generate → validate → backup → install → reload → verify."
-        actions={<>{can("config.validate") && <button className="btn" onClick={cfg.validateAll}>Validate</button>}{can("config.apply") && <button className="btn primary" onClick={cfg.applyAll}>Apply to Nagios</button>}</>} />
+        actions={<>{can("config.validate") && <button className="btn" disabled={d && !d.can_apply} onClick={cfg.validateAll}>Validate</button>}{can("config.apply") && <button className="btn primary" disabled={d && !d.can_apply} onClick={cfg.applyAll}>Apply to Nagios</button>}</>} />
       <ErrorBox error={q.error} />
+      {d?.other_changes > 0 && <Alert kind="warning">{d.other_changes} pending change(s) belong to other locations or to shared configuration. Applying sends every pending change to Nagios at once, so a Super Admin must apply first. Your own changes stay saved and are listed below.</Alert>}
       {d?.current_version && <Alert kind="info">Running configuration: <Link to={`/config/versions/${d.current_version.id}`}>version {d.current_version.id}</Link> applied {fmtDate(d.current_version.applied_at)} by {d.current_version.applied_by ?? "-"} - {d.current_version.summary}</Alert>}
       {d?.drafts > 0 && <Alert kind="warning">{d.drafts} server(s) are in Draft and will not be included until saved without draft.</Alert>}
       <Card title={`Changes (${d?.count ?? 0})`} flush>{q.isLoading ? <Loading /> : <DataTable rows={d?.changes ?? []} columns={cols} rowKey={(r) => r.id} empty="No pending changes - Nagios is in sync with the portal." />}</Card>
@@ -36,6 +37,7 @@ export function PendingPage() {
 
 export function VersionsPage() {
   const nav = useNavigate();
+  const { user } = useAuth();
   const [status, setStatus] = useState("");
   const [page, setPage] = useState(1);
   const [cmp, setCmp] = useState<number[]>([]);
@@ -53,8 +55,8 @@ export function VersionsPage() {
   const sorted = [...cmp].sort((a, b) => a - b);
   return (
     <div>
-      <PageHeader title="Configuration versions" subtitle="Every generated configuration is versioned with its files, validation result, backup and a restorable snapshot."
-        actions={<button className="btn" disabled={cmp.length !== 2} onClick={() => nav(`/config/versions/${sorted[1]}?compare=${sorted[0]}`)}><GitCompare size={15} />Compare selected</button>} />
+      <PageHeader title="Configuration versions" subtitle={user?.is_super ? "Every generated configuration is versioned with its files, validation result, backup and a restorable snapshot." : "The configuration versions you generated. Generated files and comparisons are available to Super Admin only."}
+        actions={user?.is_super && <button className="btn" disabled={cmp.length !== 2} onClick={() => nav(`/config/versions/${sorted[1]}?compare=${sorted[0]}`)}><GitCompare size={15} />Compare selected</button>} />
       <div className="toolbar"><select className="input" value={status} onChange={(e) => { setStatus(e.target.value); setPage(1); }}><option value="">All statuses</option>{["applied", "superseded", "validated", "validation_failed", "apply_failed", "generated"].map((s) => <option key={s} value={s}>{s.replace(/_/g, " ")}</option>)}</select></div>
       <ErrorBox error={q.error} />
       <Card flush>{q.isLoading ? <Loading /> : <DataTable rows={q.data?.data ?? []} columns={cols} rowKey={(r) => r.id} onRowClick={(r) => nav(`/config/versions/${r.id}`)}
@@ -71,7 +73,7 @@ export function VersionDetail() {
   const { id } = useParams();
   const nav = useNavigate();
   const qc = useQueryClient();
-  const { can } = useAuth();
+  const { can, user } = useAuth();
   const { confirm, apiError } = useUi();
   const cfg = useConfigAction();
   const params = new URLSearchParams(location.search);
@@ -79,7 +81,8 @@ export function VersionDetail() {
   const [cmpWith, setCmpWith] = useState<string>(params.get("compare") ?? String(Number(id) - 1));
   const [file, setFile] = useState<string | null>(null);
   const q = useQuery({ queryKey: ["version", id], queryFn: () => api.get(`/api/config/versions/${id}`) });
-  const diff = useQuery({ queryKey: ["diff", cmpWith, id], queryFn: () => api.get(`/api/config/versions/${cmpWith}/diff/${id}`), enabled: tab === "compare" && Number(cmpWith) > 0 });
+  const isSuper = !!user?.is_super;
+  const diff = useQuery({ queryKey: ["diff", cmpWith, id], queryFn: () => api.get(`/api/config/versions/${cmpWith}/diff/${id}`), enabled: isSuper && tab === "compare" && Number(cmpWith) > 0 });
   const fileQ = useQuery({ queryKey: ["vfile", id, file], queryFn: () => api.get(`/api/config/versions/${id}/file`, { path: file }), enabled: !!file });
   if (q.isLoading) return <Loading />;
   if (q.error) return <ErrorBox error={q.error} />;
@@ -97,11 +100,11 @@ export function VersionDetail() {
     <div className="stack">
       <PageHeader crumb={<Link to="/config/versions">Configuration versions</Link>} title={<span className="row">Version {v.id}<VersionBadge status={v.status} /></span>} subtitle={v.summary}
         actions={<>
-          <button className="btn" onClick={() => download(`/api/config/versions/${v.id}/download`)}><Download size={15} />Download</button>
+          {isSuper && <button className="btn" onClick={() => download(`/api/config/versions/${v.id}/download`)}><Download size={15} />Download</button>}
           {can("config.apply") && ["generated", "validated"].includes(v.status) && <button className="btn" onClick={applyThis}>Apply this version</button>}
           {can("config.rollback") && ["applied", "superseded", "rolled_back"].includes(v.status) && <button className="btn danger" onClick={rollback}><RotateCcw size={15} />Roll back to this version</button>}
         </>} />
-      <Tabs active={tab} onChange={setTab} tabs={[{ key: "summary", label: "Summary" }, { key: "files", label: `Files (${v.files.length})` }, { key: "compare", label: "Compare" }, { key: "output", label: "Validation output" }]} />
+      <Tabs active={tab} onChange={setTab} tabs={isSuper ? [{ key: "summary", label: "Summary" }, { key: "files", label: `Files (${v.files.length})` }, { key: "compare", label: "Compare" }, { key: "output", label: "Validation output" }] : [{ key: "summary", label: "Summary" }]} />
       {tab === "summary" && (<>
         <div className="grid grid-2">
           <Card title="Details">

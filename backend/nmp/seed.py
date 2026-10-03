@@ -8,7 +8,7 @@ from .models import (Command, Contact, ContactGroup, MonitoringTemplate, Permiss
                      SystemSetting, TemplateService)
 from .nagios import catalog
 from .nagios.legacy import load_legacy
-from .security.rbac import DEFAULT_ROLES, PERMISSIONS
+from .security.rbac import DEFAULT_ROLES, PERMISSIONS, SUPER_ADMIN_ONLY
 
 
 def seed_rbac(db: Session) -> None:
@@ -29,6 +29,12 @@ def seed_rbac(db: Session) -> None:
             role.permissions = [perms[c] for c in spec["permissions"]]
         elif name == "super_admin":
             role.permissions = [perms[c] for c in spec["permissions"]]  # super admin always has everything
+    db.flush()
+    # invariant: Super-Admin-only permissions never stay on any other role (built-in or custom)
+    for role in db.scalars(select(Role).where(Role.name != "super_admin")):
+        keep = [p for p in role.permissions if p.code not in SUPER_ADMIN_ONLY]
+        if len(keep) != len(role.permissions):
+            role.permissions = keep
     db.flush()
 
 

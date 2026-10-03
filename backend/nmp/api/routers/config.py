@@ -20,6 +20,7 @@ from ...models import (ConfigBackup, ConfigurationChange, ConfigurationVersion, 
 from ...nagios import importer, pipeline, privileged
 from ...nagios.legacy import load_legacy
 from ..deps import Principal, ctx_from, require
+from .. import scope
 from ..errors import ApiError
 from ..util import iso, ok, paginate
 
@@ -53,6 +54,36 @@ def version_payload(v: ConfigurationVersion, db: Session | None = None, detail: 
     return d
 
 
+def _redact(items: list, hidden: set[str]) -> list:
+    """Drop validation messages that mention hosts outside the user's locations."""
+    if not hidden:
+        return items
+    out = []
+    for it in items:
+        text_ = " ".join(str(v) for v in (it.values() if isinstance(it, dict) else [it]))
+        if not any(h and h in text_ for h in hidden):
+            out.append(it)
+    return out
+
+
+def version_view(v: ConfigurationVersion, db: Session | None, p: Principal, detail: bool = False) -> dict:
+    """version_payload limited to what a company-scoped user may see (Super Admin: everything)."""
+    d = version_payload(v, db, detail)
+    if p.is_super:
+        return d
+    from sqlalchemy.orm import object_session
+    sess = db or object_session(v)
+    allowed = scope.hostnames(sess, p) or set()
+    hidden = set(sess.scalars(select(Server.hostname))) - allowed
+    d["errors"] = _redact(d["errors"], hidden)
+    d["warnings"] = _redact(d["warnings"], hidden)
+    d.pop("validation_output", None)
+    d.pop("legacy_overrides", None)
+    if v.created_by != p.user.id:
+        d["summary"] = "Configuration change (another company or Super Admin)"
+    return d
+
+
 def change_payload(c: ConfigurationChange, db: Session) -> dict:
     return {"id": c.id, "time": iso(c.created_at), "entity_type": c.entity_type, "entity_id": c.entity_id,
             "entity_name": c.entity_name, "action": c.action, "old": c.old_value, "new": c.new_value,
@@ -66,13 +97,17 @@ class RunIn(BaseModel):
 # ------------------------------------------------------------ pipeline --
 @router.get("/pending")
 def pending(principal: Principal = Depends(require("config.view")), db: Session = Depends(get_db)):
-    changes = pipeline.pending_changes(db)
+    changes, others = scope.split_pending(db, principal, pipeline.pending_changes(db))
     applied = db.scalar(select(ConfigurationVersion).where(ConfigurationVersion.status == "applied")
                         .order_by(ConfigurationVersion.id.desc()))
-    drafts = db.scalar(select(func.count()).select_from(Server).where(Server.deleted_token == 0,
-                                                                     Server.config_state == "draft")) or 0
+    dstmt = select(func.count()).select_from(Server).where(Server.deleted_token == 0, Server.config_state == "draft")
+    cond = scope.server_filter(principal)
+    if cond is not None:
+        dstmt = dstmt.where(cond)
+    drafts = db.scalar(dstmt) or 0
     return ok({"changes": [change_payload(c, db) for c in changes], "count": len(changes),
-               "current_version": version_payload(applied, db) if applied else None, "drafts": drafts})
+               "other_changes": len(others), "can_apply": principal.is_super or not others,
+               "current_version": version_view(applied, db, principal) if applied else None, "drafts": drafts})
 
 
 def _summary(db: Session, body: RunIn | None) -> str:
@@ -90,21 +125,23 @@ def _summary(db: Session, body: RunIn | None) -> str:
 @router.post("/validate")
 def validate(request: Request, body: RunIn | None = None, principal: Principal = Depends(require("config.validate")),
              db: Session = Depends(get_db)):
+    scope.assert_can_run_pipeline(db, principal)
     try:
         v = pipeline.run_pipeline(db, ctx_from(request, principal), _summary(db, body), apply=False)
     except pipeline.PipelineBusy as exc:
         raise ApiError(409, "busy", str(exc))
-    return ok(version_payload(v, db, detail=True))
+    return ok(version_view(v, db, principal, detail=True))
 
 
 @router.post("/apply")
 def apply(request: Request, body: RunIn | None = None, principal: Principal = Depends(require("config.apply")),
           db: Session = Depends(get_db)):
+    scope.assert_can_run_pipeline(db, principal)
     try:
         v = pipeline.run_pipeline(db, ctx_from(request, principal), _summary(db, body), apply=True)
     except pipeline.PipelineBusy as exc:
         raise ApiError(409, "busy", str(exc))
-    return ok(version_payload(v, db, detail=True))
+    return ok(version_view(v, db, principal, detail=True))
 
 
 # ------------------------------------------------------------ versions --
@@ -113,29 +150,33 @@ def versions(page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=200
              status: str | None = Query(None, max_length=30),
              principal: Principal = Depends(require("config.view")), db: Session = Depends(get_db)):
     stmt = select(ConfigurationVersion).order_by(ConfigurationVersion.id.desc())
+    if not principal.is_super:  # company-scoped users see the versions they generated themselves
+        stmt = stmt.where(ConfigurationVersion.created_by == principal.user.id)
     if status:
         stmt = stmt.where(ConfigurationVersion.status == status)
     rows = list(db.scalars(stmt))
     items, meta = paginate(rows, page, page_size)
-    return ok([version_payload(v, db) for v in items], meta)
+    return ok([version_view(v, db, principal) for v in items], meta)
 
 
-def _version(db: Session, vid: int) -> ConfigurationVersion:
+def _version(db: Session, vid: int, p: Principal | None = None) -> ConfigurationVersion:
     v = db.get(ConfigurationVersion, vid)
-    if v is None:
+    if v is None or (p is not None and not p.is_super and v.created_by != p.user.id):
         raise ApiError(404, "not_found", "version not found")
     return v
 
 
 @router.get("/versions/{vid}")
 def version_detail(vid: int, principal: Principal = Depends(require("config.view")), db: Session = Depends(get_db)):
-    v = _version(db, vid)
-    d = version_payload(v, db, detail=True)
+    v = _version(db, vid, principal)
+    d = version_view(v, db, principal, detail=True)
     d["changes"] = [change_payload(c, db) for c in db.scalars(
-        select(ConfigurationChange).where(ConfigurationChange.version_id == v.id).order_by(ConfigurationChange.id))]
+        select(ConfigurationChange).where(ConfigurationChange.version_id == v.id).order_by(ConfigurationChange.id))
+        if scope.change_in_scope(db, principal, c.entity_type, c.entity_id)]
+    # generated files contain every site's configuration: Super Admin only
     d["files"] = [{"path": f.path, "sha256": f.sha256, "size": len(f.content)} for f in db.scalars(
         select(ConfigurationVersionFile).where(ConfigurationVersionFile.version_id == v.id)
-        .order_by(ConfigurationVersionFile.path))]
+        .order_by(ConfigurationVersionFile.path))] if principal.is_super else []
     if v.backup_id:
         b = db.get(ConfigBackup, v.backup_id)
         d["backup"] = {"id": b.id, "name": b.name} if b else None
@@ -145,6 +186,7 @@ def version_detail(vid: int, principal: Principal = Depends(require("config.view
 @router.get("/versions/{vid}/file")
 def version_file(vid: int, path: str = Query(..., max_length=300), principal: Principal = Depends(require("config.view")),
                  db: Session = Depends(get_db)):
+    scope.require_super(principal)
     f = db.scalar(select(ConfigurationVersionFile).where(ConfigurationVersionFile.version_id == vid,
                                                          ConfigurationVersionFile.path == path))
     if f is None:
@@ -154,6 +196,7 @@ def version_file(vid: int, path: str = Query(..., max_length=300), principal: Pr
 
 @router.get("/versions/{a}/diff/{b}")
 def version_diff(a: int, b: int, principal: Principal = Depends(require("config.view")), db: Session = Depends(get_db)):
+    scope.require_super(principal)
     va, vb = _version(db, a), _version(db, b)
     return ok({"from": a, "to": b, "files": pipeline.diff_versions(db, va, vb)})
 
@@ -161,6 +204,7 @@ def version_diff(a: int, b: int, principal: Principal = Depends(require("config.
 @router.get("/versions/{vid}/download")
 def version_download(vid: int, request: Request, principal: Principal = Depends(require("config.view")),
                      db: Session = Depends(get_db)):
+    scope.require_super(principal)
     v = _version(db, vid)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -181,7 +225,8 @@ def version_download(vid: int, request: Request, principal: Principal = Depends(
 @router.post("/versions/{vid}/apply")
 def apply_existing(vid: int, request: Request, principal: Principal = Depends(require("config.apply")),
                    db: Session = Depends(get_db)):
-    v = _version(db, vid)
+    v = _version(db, vid, principal)
+    scope.assert_can_run_pipeline(db, principal)
     latest = db.scalar(select(func.max(ConfigurationVersion.id)))
     if v.id != latest:
         raise ApiError(409, "stale_version", "Only the most recent generated version can be applied. Generate a new one.")
@@ -189,7 +234,7 @@ def apply_existing(vid: int, request: Request, principal: Principal = Depends(re
         raise ApiError(409, "invalid_state", f"Version is '{v.status}' and cannot be applied")
     with pipeline.config_lock(db):
         v = pipeline.apply_version(db, ctx_from(request, principal), v)
-    return ok(version_payload(v, db, detail=True))
+    return ok(version_view(v, db, principal, detail=True))
 
 
 @router.post("/versions/{vid}/rollback")
@@ -216,7 +261,7 @@ def backup_payload(b: ConfigBackup, db: Session) -> dict:
 
 @backups_router.get("")
 def list_backups(page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=500),
-                 principal: Principal = Depends(require("config.view")), db: Session = Depends(get_db)):
+                 principal: Principal = Depends(require("backups.manage")), db: Session = Depends(get_db)):
     rows = list(db.scalars(select(ConfigBackup).order_by(ConfigBackup.id.desc())))
     items, meta = paginate(rows, page, page_size)
     return ok([backup_payload(b, db) for b in items], meta)

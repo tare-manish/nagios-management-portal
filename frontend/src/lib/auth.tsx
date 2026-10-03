@@ -6,6 +6,7 @@ export interface User {
   id: number; username: string; full_name: string; email?: string;
   roles: { name: string; display_name: string }[]; permissions: string[];
   must_change_password: boolean; last_login_at?: string;
+  is_super?: boolean; companies?: { id: number; name: string }[]; locations?: { id: number; name: string }[];
 }
 interface AuthState {
   user: User | null; loading: boolean;

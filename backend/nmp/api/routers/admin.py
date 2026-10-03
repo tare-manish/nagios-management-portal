@@ -10,7 +10,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from ... import validators as V
@@ -25,6 +25,7 @@ from ...security import passwords
 from ...security.rbac import PERMISSIONS, SUPER_ADMIN_ONLY
 from ...security.sessions import revoke_user_sessions
 from ..deps import Principal, ctx_from, require
+from .. import scope
 from ..errors import ApiError
 from ..util import csv_response, iso, ok, paginate, ts_iso
 
@@ -38,6 +39,8 @@ class UserIn(BaseModel):
     email: Optional[str] = None
     role_ids: list[int] = Field(min_length=1)
     is_active: bool = True
+    company_ids: list[int] = Field(default_factory=list, max_length=200)
+    location_ids: list[int] = Field(default_factory=list, max_length=200)
     password: Optional[str] = Field(None, max_length=256)
     must_change_password: bool = True
 
@@ -63,6 +66,8 @@ class UserIn(BaseModel):
 def user_payload(u: User) -> dict:
     return {"id": u.id, "username": u.username, "full_name": u.full_name, "email": u.email, "is_active": u.is_active,
             "roles": [{"id": r.id, "name": r.name, "display_name": r.display_name} for r in u.roles],
+            "companies": [{"id": c.id, "name": c.name} for c in u.companies],
+            "locations": [{"id": l.id, "name": l.name} for l in u.locations],
             "must_change_password": u.must_change_password, "locked": bool(u.locked_until and u.locked_until > utcnow()),
             "last_login_at": iso(u.last_login_at), "last_login_ip": u.last_login_ip, "created_at": iso(u.created_at)}
 
@@ -73,6 +78,22 @@ def _super_admin_count(db: Session, exclude: int | None = None) -> int:
         if u.id != exclude and any(r.name == "super_admin" for r in u.roles):
             n += 1
     return n
+
+
+def _locations(db: Session, ids: list[int]):
+    from ...models import Location
+    locs = list(db.scalars(select(Location).where(Location.id.in_(ids)))) if ids else []
+    if len(locs) != len(set(ids)):
+        raise ApiError(422, "validation_error", "Unknown location", [{"field": "location_ids", "message": "unknown id"}])
+    return locs
+
+
+def _companies(db: Session, ids: list[int]):
+    from ...models import Company
+    cos = list(db.scalars(select(Company).where(Company.id.in_(ids)))) if ids else []
+    if len(cos) != len(set(ids)):
+        raise ApiError(422, "validation_error", "Unknown company", [{"field": "company_ids", "message": "unknown id"}])
+    return cos
 
 
 def _assert_can_grant(principal: Principal, roles: list[Role]) -> None:
@@ -107,6 +128,8 @@ def create_user(body: UserIn, request: Request, principal: Principal = Depends(r
              password_hash=passwords.hash_password(body.password), must_change_password=body.must_change_password,
              created_by=ctx.user_id, password_changed_at=utcnow())
     u.roles = roles
+    u.companies = _companies(db, body.company_ids)
+    u.locations = _locations(db, body.location_ids)
     db.add(u)
     db.flush()
     audit(db, ctx, "user.create", entity_type="user", entity_id=u.id, entity_name=u.username, new=user_payload(u))
@@ -134,6 +157,8 @@ def update_user(uid: int, body: UserIn, request: Request, principal: Principal =
         raise ApiError(409, "self_disable", "You cannot deactivate your own account")
     u.full_name, u.email, u.is_active = body.full_name, body.email, body.is_active
     u.roles = roles
+    u.companies = _companies(db, body.company_ids)
+    u.locations = _locations(db, body.location_ids)
     u.updated_by = ctx.user_id
     if body.password:
         errs = passwords.password_policy_errors(body.password, u.username)
@@ -142,7 +167,9 @@ def update_user(uid: int, body: UserIn, request: Request, principal: Principal =
         u.password_hash = passwords.hash_password(body.password)
         u.must_change_password = body.must_change_password
         u.password_changed_at = utcnow()
-    if not u.is_active or body.password or {r["id"] for r in old["roles"]} != set(body.role_ids):
+    if not u.is_active or body.password or {r["id"] for r in old["roles"]} != set(body.role_ids) \
+            or {l["id"] for l in old["locations"]} != set(body.location_ids) \
+            or {c["id"] for c in old["companies"]} != set(body.company_ids):
         revoke_user_sessions(db, u.id, except_id=principal.session.id if u.id == principal.user.id else None)
     audit(db, ctx, "user.update", entity_type="user", entity_id=u.id, entity_name=u.username, old=old, new=user_payload(u))
     db.commit()
@@ -379,6 +406,17 @@ def audit_log(q: Optional[str] = Query(None, max_length=100), user: Optional[str
               format: str = Query("json", pattern="^(json|csv)$"),
               principal: Principal = Depends(require("audit.view")), db: Session = Depends(get_db)):
     stmt = _audit_query(db, q, user, action, entity_type, result, since, until)
+    if not principal.is_super:
+        # company-scoped: entries about their servers/hosts/companies, plus their own actions
+        ids = scope.server_ids(db, principal) or {-1}
+        hosts = scope.hostnames(db, principal) or {"\x00"}
+        cos = list(principal.company_ids) or [-1]
+        stmt = stmt.where(or_(and_(AuditLog.entity_type == "server", AuditLog.entity_id.in_(ids)),
+                              and_(AuditLog.entity_type == "host", AuditLog.entity_name.in_(hosts)),
+                              and_(AuditLog.entity_type == "company", AuditLog.action == "server.company",
+                                   AuditLog.entity_id.in_(cos), AuditLog.entity_name.in_(hosts)),
+                              and_(AuditLog.user_id == principal.user.id,
+                                   AuditLog.entity_type.not_in(("company", "location")))))
     if format == "csv":
         rows = db.scalars(stmt.limit(100000))
         return csv_response("audit-log.csv", ["time_utc", "user", "ip", "action", "entity_type", "entity",
@@ -465,13 +503,15 @@ def health(deep: bool = False, principal: Principal = Depends(require("health.vi
     last = db.scalar(select(ConfigurationVersion).where(ConfigurationVersion.status == "applied")
                      .order_by(ConfigurationVersion.id.desc()))
     latest = db.scalar(select(ConfigurationVersion).order_by(ConfigurationVersion.id.desc()))
-    drift = _drift(db, last)
+    drift = _drift(db, last) if principal.is_super else []
     cfg_status = "ok"
     detail = f"version {last.id} applied {iso(last.applied_at)}" if last else "no configuration applied yet"
     if latest and latest.status in ("validation_failed", "apply_failed"):
         cfg_status, detail = "warning", detail + f"; latest v{latest.id} {latest.status}"
     if drift:
         cfg_status, detail = "warning", detail + f"; drift detected in {len(drift)} file(s)"
+    if not principal.is_super:
+        detail = f"version {last.id} applied {iso(last.applied_at)}" if last else "no configuration applied yet"
     add("Configuration", cfg_status, detail, drift=drift[:20])
     b = db.scalar(select(ConfigBackup).order_by(ConfigBackup.id.desc()))
     add("Last configuration backup", "ok" if b else "warning", f"{b.name} ({iso(b.created_at)})" if b else "none yet")
@@ -480,9 +520,9 @@ def health(deep: bool = False, principal: Principal = Depends(require("health.vi
     wage = (utcnow() - w.last_run_at).total_seconds() if w else None
     add("Background worker", "ok" if wage is not None and wage < 180 else "warning",
         f"last run {int(wage)}s ago" if wage is not None else "not running")
-    ncpa = _ncpa_summary(db, snap, probe=deep)
+    ncpa = _ncpa_summary(db, snap, probe=deep, principal=principal)
     add("NCPA connectivity", ncpa["status"], ncpa["detail"], agents=ncpa["agents"])
-    if deep:
+    if deep and principal.is_super:
         try:
             res = privileged.run("status")
             add("Live configuration validation", "ok" if res.get("config_valid") else "critical",
@@ -519,8 +559,10 @@ def _drift(db: Session, v: ConfigurationVersion | None) -> list[str]:
     return out
 
 
-def _ncpa_summary(db: Session, snap, probe: bool) -> dict:
-    servers = list(db.scalars(select(Server).where(Server.deleted_token == 0, Server.monitoring_method == "ncpa")))
+def _ncpa_summary(db: Session, snap, probe: bool, principal: Principal | None = None) -> dict:
+    servers = [s for s in (scope.scoped_servers(db, principal) if principal else
+                           db.scalars(select(Server).where(Server.deleted_token == 0)))
+               if s.monitoring_method == "ncpa"]
     agents = []
     bad = 0
     for s in servers:

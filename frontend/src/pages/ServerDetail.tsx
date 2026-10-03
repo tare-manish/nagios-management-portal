@@ -156,7 +156,7 @@ export default function ServerDetail() {
             <Card title="Overview">
               <dl className="dl">
                 <dt>Hostname</dt><dd>{s.hostname}</dd><dt>Display name</dt><dd>{s.display_name}</dd><dt>IP / FQDN</dt><dd className="mono">{s.address}</dd>
-                <dt>Operating system</dt><dd>{osLabel(s.os_type)} {s.os_version}</dd><dt>Location</dt><dd>{s.location ?? "-"}</dd>
+                <dt>Operating system</dt><dd>{osLabel(s.os_type)} {s.os_version}</dd><dt>Location</dt><dd>{s.location_name ?? "Not assigned"}{s.location ? ` · ${s.location}` : ""}</dd>{"company_name" in s && <><dt>Company</dt><dd>{s.company_name ?? "Not assigned"}</dd></>}
                 <dt>Environment</dt><dd>{envLabel(s.environment)}</dd><dt>Agent</dt><dd>{methodLabel(s.monitoring_method)} (host check: {s.host_check})</dd>
                 <dt>Host groups</dt><dd>{s.groups.map((g: any) => <span className="tag" key={g.id}>{g.name}</span>)}</dd>
                 <dt>Contact groups</dt><dd>{s.contact_groups.map((g: any) => <span className="tag" key={g.id}>{g.name}</span>) }{!s.contact_groups.length && <span className="faint">default</span>}</dd>

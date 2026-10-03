@@ -69,6 +69,19 @@ curl -sk -b jar -H "X-CSRF-Token: $T" -X POST $B/api/config/apply
 | DELETE | `/api/users/{uid}` | Delete User |
 | POST | `/api/users/{uid}/unlock` | Unlock User |
 
+### Companies and locations
+
+| Method | Path | Operation |
+|---|---|---|
+| GET | `/api/companies` | Super Admin: all companies with server and user counts. Others: their own companies |
+| POST | `/api/companies` | Create `{"name","code","description","is_active"}` (Super Admin) |
+| PUT | `/api/companies/{id}` | Rename / retire (Super Admin) |
+| GET | `/api/locations` | Super Admin: all locations with counts. Others: their assigned sites, or all active sites if not site-limited |
+| POST | `/api/locations` | Create (Super Admin) |
+| PUT | `/api/locations/{id}` | Rename / retire (Super Admin) |
+
+Servers take `company_id` (required for non-Super-Admin users, must be one of theirs) and `location_id`. Lists, dashboard and reports accept `company_id` and `location_id` within the caller's scope (`-1` = not assigned, Super Admin only). Users take `company_ids` and optional `location_ids`.
+
 ### Maintenance (Super Admin only)
 
 | Method | Path | Operation |

@@ -17,6 +17,7 @@ from ...notifications.providers.base import ProviderError
 from ...notifications.providers.registry import all_providers, get as get_provider
 from ...security import crypto
 from ..deps import Principal, ctx_from, require
+from .. import scope
 from ..errors import ApiError
 from ..util import iso, ok
 
@@ -252,11 +253,16 @@ def feed(limit: int = Query(50, ge=1, le=500), unread_only: bool = False,
          principal: Principal = Depends(require("monitoring.view")), db: Session = Depends(get_db)):
     web_channels = [c.id for c in db.scalars(select(NotificationChannel).where(NotificationChannel.provider == "web"))]
     stmt = select(Notification).order_by(Notification.id.desc()).limit(limit)
+    ustmt = select(func.count()).select_from(Notification).where(
+        Notification.read_at.is_(None), Notification.channel_id.in_(web_channels or [0]))
+    ids = scope.server_ids(db, principal)
+    if ids is not None:  # company-scoped: alerts about their own servers only
+        stmt = stmt.where(Notification.server_id.in_(ids or {-1}))
+        ustmt = ustmt.where(Notification.server_id.in_(ids or {-1}))
     if unread_only:
         stmt = stmt.where(Notification.read_at.is_(None))
     rows = list(db.scalars(stmt))
-    unread = db.scalar(select(func.count()).select_from(Notification).where(
-        Notification.read_at.is_(None), Notification.channel_id.in_(web_channels or [0]))) or 0
+    unread = db.scalar(ustmt) or 0
     return ok([{"id": n.id, "time": iso(n.created_at), "title": n.title, "message": n.message,
                 "event_type": n.event_type, "status": n.status, "error": n.error, "server_id": n.server_id,
                 "channel_id": n.channel_id, "read": n.read_at is not None, "in_app": n.channel_id in web_channels}
@@ -265,6 +271,10 @@ def feed(limit: int = Query(50, ge=1, le=500), unread_only: bool = False,
 
 @router.post("/api/notifications/read-all")
 def mark_all_read(principal: Principal = Depends(require("monitoring.view")), db: Session = Depends(get_db)):
-    db.execute(update(Notification).where(Notification.read_at.is_(None)).values(read_at=utcnow()))
+    stmt = update(Notification).where(Notification.read_at.is_(None))
+    ids = scope.server_ids(db, principal)
+    if ids is not None:
+        stmt = stmt.where(Notification.server_id.in_(ids or {-1}))
+    db.execute(stmt.values(read_at=utcnow()))
     db.commit()
     return ok({"ok": True})

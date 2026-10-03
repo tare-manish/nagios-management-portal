@@ -13,7 +13,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from . import __version__
 from .api.deps import Principal, client_ip, get_principal
 from .api.errors import error_body, install_handlers
-from .api.routers import admin, auth, catalog, config, maintenance, monitoring, notifications, reports, servers
+from .api.routers import admin, auth, catalog, config, maintenance, monitoring, notifications, orgs, reports, servers
 from .config import get_settings
 from .db import SessionLocal
 from .logging_setup import setup_logging
@@ -73,7 +73,7 @@ def create_app() -> FastAPI:
     install_handlers(app)
     app.add_middleware(SecurityMiddleware, limiter=SlidingWindowLimiter(s.api_rate_limit_per_minute))
     for r in (auth.router, servers.router, config.router, config.backups_router, config.import_router,
-              catalog.router, monitoring.router, reports.router, admin.router, notifications.router, maintenance.router):
+              catalog.router, monitoring.router, reports.router, admin.router, notifications.router, maintenance.router, orgs.router):
         app.include_router(r)
 
     @app.get("/api/healthz", include_in_schema=False)

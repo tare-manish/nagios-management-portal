@@ -48,10 +48,14 @@ function RowMenu({ s, onAction }: { s: any; onAction: (a: string, s: any) => voi
 export default function ServersPage({ deviceType }: { deviceType: "server" | "network_device" }) {
   const nav = useNavigate();
   const qc = useQueryClient();
-  const { can } = useAuth();
+  const { can, user } = useAuth();
+  const isSuper = !!user?.is_super;
   const { confirm, toast, apiError } = useUi();
   const cfg = useConfigAction();
-  const [f, setF] = useState({ q: "", status: "", os_type: "", environment: "", monitoring_method: "", group_id: "", config_state: "" });
+  const [f, setF] = useState({ q: "", status: "", os_type: "", environment: "", monitoring_method: "", group_id: "", config_state: "", location_id: "", company_id: "" });
+  const locations = useQuery({ queryKey: ["locations"], queryFn: () => api.get("/api/locations") });
+  const companies = useQuery({ queryKey: ["companies"], queryFn: () => api.get("/api/companies") });
+  const multiCo = isSuper || (companies.data?.data ?? []).length > 1;
   const [sort, setSort] = useState<{ key: string; dir: "asc" | "desc" }>({ key: "hostname", dir: "asc" });
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
@@ -93,7 +97,8 @@ export default function ServersPage({ deviceType }: { deviceType: "server" | "ne
     { key: "os_type", header: net ? "Type" : "Operating system", render: (s) => <>{osLabel(s.os_type)}{s.os_version && <div className="faint small">{s.os_version}</div>}</> },
     { key: "monitoring_method", header: "Agent", render: (s) => methodLabel(s.monitoring_method) },
     { key: "environment", header: "Environment", render: (s) => envLabel(s.environment) },
-    { key: "location", header: "Location" },
+    ...(multiCo ? [{ key: "company", header: "Company", render: (s: any) => s.company_name ?? <span className="faint">-</span> } as Column<any>] : []),
+    { key: "site", header: "Location", render: (s) => <>{s.location_name ?? <span className="faint">Not assigned</span>}{s.location && <div className="faint small">{s.location}</div>}</> },
     { key: "group", header: "Host group", render: (s) => s.groups.map((g: any) => <span className="tag" key={g.id}>{g.name}</span>) },
     { key: "cpu", header: "CPU", render: (s) => <Meter value={s.metrics.cpu} /> },
     { key: "memory", header: "Memory", render: (s) => <Meter value={s.metrics.memory} /> },
@@ -125,6 +130,8 @@ export default function ServersPage({ deviceType }: { deviceType: "server" | "ne
         <div className="search"><Search size={15} /><input className="input" placeholder="Search hostname, name, IP, location" value={f.q} onChange={(e) => set("q", e.target.value)} /></div>
         <select className="input" value={f.status} onChange={(e) => set("status", e.target.value)}><option value="">All statuses</option>{["UP", "DOWN", "UNREACHABLE", "PENDING", "UNMONITORED"].map((s) => <option key={s}>{s}</option>)}</select>
         {!net && <select className="input" value={f.os_type} onChange={(e) => set("os_type", e.target.value)}><option value="">All OS</option>{OS_TYPES.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</select>}
+        {multiCo && <select className="input" value={f.company_id} onChange={(e) => set("company_id", e.target.value)} aria-label="Company"><option value="">{isSuper ? "All companies" : "All my companies"}</option>{(companies.data?.data ?? []).map((c: any) => <option key={c.id} value={c.id}>{c.name}</option>)}{isSuper && <option value="-1">No company</option>}</select>}
+        {(isSuper || (locations.data?.data ?? []).length > 1) && <select className="input" value={f.location_id} onChange={(e) => set("location_id", e.target.value)} aria-label="Location"><option value="">All locations</option>{(locations.data?.data ?? []).map((l: any) => <option key={l.id} value={l.id}>{l.name}</option>)}{isSuper && <option value="-1">Not assigned</option>}</select>}
         <select className="input" value={f.environment} onChange={(e) => set("environment", e.target.value)}><option value="">All environments</option>{ENVIRONMENTS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</select>
         <select className="input" value={f.monitoring_method} onChange={(e) => set("monitoring_method", e.target.value)}><option value="">All agents</option>{METHODS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</select>
         <select className="input" value={f.group_id} onChange={(e) => set("group_id", e.target.value)}><option value="">All host groups</option>{(groups.data?.data ?? []).map((g: any) => <option key={g.id} value={g.id}>{g.name}</option>)}</select>

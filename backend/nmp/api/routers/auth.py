@@ -39,6 +39,9 @@ def user_payload(user: User) -> dict:
         "roles": [{"name": r.name, "display_name": r.display_name} for r in user.roles],
         "permissions": sorted(user_permissions(user)), "must_change_password": user.must_change_password,
         "last_login_at": iso(user.last_login_at),
+        "is_super": any(r.name == "super_admin" for r in user.roles),
+        "companies": [{"id": c.id, "name": c.name} for c in user.companies if c.is_active],
+        "locations": [{"id": l.id, "name": l.name} for l in user.locations if l.is_active],
     }
 
 

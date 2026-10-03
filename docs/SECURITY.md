@@ -38,6 +38,16 @@ The portal manages infrastructure monitoring, so it is built on the assumption t
 
 `test_api_security.py` covers: unauthenticated access, login/logout/cookie flags, username enumeration, account lockout, missing and forged CSRF, cross-origin POST, security headers, the permission matrix for viewer/operator/administrator, audit of denied access, privilege escalation through users and roles, last-super-admin protection, SQL injection payloads in filters, injection in host name/address/display name/check period, service parameter and threshold injection, custom command injection, secrets never returned in any response, and the error format. `test_unit.py` covers validators, argument rendering, crypto purpose binding, password hashing and policy, and log redaction.
 
+## Company isolation
+
+| Control | How |
+|---|---|
+| Who sees what | Super Admin: every company and location. Everyone else: only servers of the companies assigned to them (`user_companies`), and - if sites are also assigned (`user_locations`) - only at those sites. A site restriction whose sites were all retired shows nothing (it never widens to "all sites"). Enforced in the API for every list, detail, dashboard, report, CSV export, audit view, notification feed, Nagios host/service view and operator action (acknowledge, downtime, re-check). Out-of-scope servers return 404, exactly like missing ones. |
+| Company data | Users only ever receive their own companies (lists, filters, reports, CSV). Filtering by a company or site outside their scope returns 403; creating or moving a server into another company is refused. |
+| Super-Admin-only permissions | `companies.manage`, `locations.manage`, `templates.manage`, `catalog.manage`, `contacts.manage`, `groups.manage`, `notifications.manage`, `config.rollback`, `config.import`, `backups.manage`, `maintenance.cleanup`. They count only for holders of the `super_admin` role, are stripped from every other role on each upgrade, and cannot be added to custom roles. |
+| Applying configuration | Generation always covers the whole estate, so a scoped Administrator may validate/apply only when every pending change belongs to their companies. Generated files, version diffs and downloads are Super Admin only; validation messages naming other sites' hosts are removed from what scoped users see. |
+| Hosts outside the inventory | Hosts defined only in manual Nagios files (e.g. `localhost`) and servers with no company are visible to Super Admin only. |
+
 ## Data cleanup (Super Admin only)
 
 | Control | How |

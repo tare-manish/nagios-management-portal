@@ -32,12 +32,20 @@ PERMISSIONS: dict[str, tuple[str, str]] = {
     "backups.manage": ("Administration", "Create, download and restore configuration backups"),
     "health.view": ("Administration", "View system health"),
     "maintenance.cleanup": ("Administration", "Clean up junk and stale data (Super Admin only)"),
+    "companies.manage": ("Administration", "View and manage companies; see company data (Super Admin only)"),
+    "locations.manage": ("Administration", "Manage locations and assign users to locations (Super Admin only)"),
 }
 
 # Permissions that only the Super Admin role may ever hold. They are never part of
 # another default role, cannot be added to custom roles, and the API additionally
 # requires the super_admin role itself.
-SUPER_ADMIN_ONLY = frozenset({"maintenance.cleanup"})
+SUPER_ADMIN_ONLY = frozenset({
+    "maintenance.cleanup", "companies.manage", "locations.manage",
+    # shared by every company/location - changing them affects all sites
+    "templates.manage", "catalog.manage", "contacts.manage", "groups.manage", "notifications.manage",
+    # whole-estate operations
+    "config.rollback", "config.import", "backups.manage",
+})
 
 _VIEW = [
     "dashboard.view", "monitoring.view", "servers.view", "templates.view",

@@ -13,16 +13,17 @@ from ... import validators as V
 from ...audit import AuditContext, audit, record_change
 from ...db import get_db, utcnow
 from ...live import availability_30d, host_live, service_live, service_metrics
-from ...models import (AuditLog, ConfigurationChange, ContactGroup, MonitoringTemplate, PerfSample, Server,
-                       ServerCredential, ServerGroup, ServerService, Service, ServiceThreshold)
+from ...models import (AuditLog, Company, ConfigurationChange, ContactGroup, Location, MonitoringTemplate, PerfSample,
+                       Server, ServerCredential, ServerGroup, ServerService, Service, ServiceThreshold)
 from ...nagios import logparser, pipeline
 from ...nagios.status import get_status
 from ...security import crypto
 from ..deps import Principal, ctx_from, require
+from .. import scope
 from ..errors import ApiError
 from ..schemas import ActionIn, ConnectionTestIn, NcpaIn, NrpeIn, ServerIn, ServiceItemIn
 from ..util import get_or_404, iso, ok, paginate
-from .config import version_payload
+from .config import version_view
 
 router = APIRouter(prefix="/api/servers", tags=["servers"])
 
@@ -64,6 +65,7 @@ def server_payload(s: Server, snap=None, avail: dict | None = None, detail: bool
     d = {
         "id": s.id, "hostname": s.hostname, "display_name": s.display_name, "address": s.address,
         "description": s.description, "location": s.location, "environment": s.environment,
+        "location_id": s.location_id, "location_name": s.site.name if s.site else None,
         "os_type": s.os_type, "os_version": s.os_version, "device_type": s.device_type,
         "monitoring_method": s.monitoring_method, "host_check": s.host_check,
         "groups": [{"id": g.id, "name": g.name} for g in s.groups],
@@ -77,6 +79,8 @@ def server_payload(s: Server, snap=None, avail: dict | None = None, detail: bool
         "notification_period": s.notification_period, "service_count": len(s.services),
         "created_at": iso(s.created_at), "updated_at": iso(s.updated_at),
     }
+    d["company_id"] = s.company_id
+    d["company_name"] = s.company.name if s.company else None
     if snap is not None:
         d["live"] = host_live(s.hostname, snap)
         d["metrics"] = service_metrics(s, snap)
@@ -91,6 +95,7 @@ def audit_view(s: Server) -> dict:
     """Configuration values recorded in audit/changes (secrets excluded)."""
     return {
         "hostname": s.hostname, "display_name": s.display_name, "address": s.address, "location": s.location,
+        "site": s.site.name if s.site else None, "company": s.company.name if s.company else None,
         "environment": s.environment, "os_type": s.os_type, "monitoring_method": s.monitoring_method,
         "host_check": s.host_check, "groups": sorted(g.name for g in s.groups),
         "contact_groups": sorted(g.name for g in s.contact_groups), "is_enabled": s.is_enabled,
@@ -117,6 +122,8 @@ def list_servers(
     monitoring_method: str | None = Query(None, max_length=20),
     device_type: str | None = Query(None, max_length=20),
     config_state: str | None = Query(None, max_length=20),
+    location_id: int | None = None,
+    company_id: int | None = None,
     sort: str = Query("hostname", max_length=30),
     order: str = Query("asc", pattern="^(asc|desc)$"),
     page: int = Query(1, ge=1),
@@ -125,6 +132,11 @@ def list_servers(
     db: Session = Depends(get_db),
 ):
     stmt = select(Server).where(Server.deleted_token == 0)
+    cond = scope.server_filter(principal)
+    if cond is not None:
+        stmt = stmt.where(cond)
+    scope.check_filters(principal, company_id, location_id)   # -1 = "not assigned" (Super Admin only)
+    stmt = scope.narrow(stmt, company_id, location_id)
     if q:
         like = f"%{q.strip()}%"
         stmt = stmt.where(or_(Server.hostname.like(like), Server.display_name.like(like), Server.address.like(like),
@@ -154,6 +166,10 @@ def list_servers(
             return r["live"][sort] or ""
         if sort == "group":
             return ",".join(g["name"] for g in r["groups"])
+        if sort == "company":
+            return (r.get("company_name") or "~").lower()
+        if sort == "site":
+            return (r.get("location_name") or "~").lower()
         v = r.get(sort)
         return (v or "").lower() if isinstance(v, str) or v is None else v
 
@@ -169,12 +185,36 @@ def list_servers(
 
 @router.get("/{server_id}")
 def get_server(server_id: int, principal: Principal = Depends(require("servers.view")), db: Session = Depends(get_db)):
-    s = get_or_404(db, Server, server_id, "server")
+    s = scope.get_visible_server(db, principal, server_id)
     snap = get_status()
     return ok(server_payload(s, snap, availability_30d(snap), detail=True))
 
 
 # ------------------------------------------------------------- helpers --
+def _apply_site(db: Session, s: Server, body: ServerIn, principal: Principal, creating: bool) -> dict:
+    """Location (site) and company. Returns {old, new} for the audit log when something changed."""
+    before = {"site": s.site.name if s.site else None, "company": s.company.name if s.company else None}
+    sent = body.model_fields_set
+    loc_id = body.location_id if (creating or "location_id" in sent) else s.location_id
+    cid = body.company_id if (creating or "company_id" in sent) else s.company_id
+    if loc_id is not None:
+        loc = db.get(Location, loc_id)
+        if loc is None or (not loc.is_active and loc_id != s.location_id):
+            raise ApiError(422, "validation_error", "Unknown or retired location",
+                           [{"field": "location_id", "message": "unknown"}])
+    if cid is not None:
+        c = db.get(Company, cid)
+        if c is None or (not c.is_active and cid != s.company_id):
+            raise ApiError(422, "validation_error", "Unknown or retired company",
+                           [{"field": "company_id", "message": "unknown"}])
+    scope.assert_org_allowed(principal, cid, loc_id)   # users may only use their own companies / sites
+    s.location_id, s.company_id = loc_id, cid
+    db.flush()
+    db.refresh(s, ["site", "company"])
+    after = {"site": s.site.name if s.site else None, "company": s.company.name if s.company else None}
+    return {} if before == after and not creating else {"old": before, "new": after}
+
+
 def _apply_fields(db: Session, s: Server, body: ServerIn) -> None:
     for f in ("hostname", "display_name", "address", "description", "location", "environment", "os_type",
               "os_version", "device_type", "monitoring_method", "host_check", "check_interval", "retry_interval",
@@ -313,11 +353,12 @@ def _run_action(db: Session, ctx: AuditContext, principal: Principal, action: st
         raise ApiError(403, "forbidden", "You do not have permission to validate configuration")
     if action == "apply" and not principal.has("config.apply"):
         raise ApiError(403, "forbidden", "You do not have permission to apply configuration")
+    scope.assert_can_run_pipeline(db, principal)
     try:
         v = pipeline.run_pipeline(db, ctx, summary, apply=(action == "apply"))
     except pipeline.PipelineBusy as exc:
         raise ApiError(409, "busy", str(exc))
-    return version_payload(v)
+    return version_view(v, None, principal)
 
 
 def _hostname_taken(db: Session, hostname: str, exclude_id: int | None = None) -> bool:
@@ -334,11 +375,14 @@ def create_server(body: ServerIn, request: Request, principal: Principal = Depen
     ctx = ctx_from(request, principal)
     if _hostname_taken(db, body.hostname):
         raise ApiError(409, "conflict", f"A server named '{body.hostname}' already exists")
+    if body.action in ("validate", "apply"):
+        scope.assert_can_run_pipeline(db, principal)
     s = Server(created_by=ctx.user_id, updated_by=ctx.user_id)
     _apply_fields(db, s, body)
     s.config_state = "draft" if body.action == "draft" else "pending"
     db.add(s)
     db.flush()
+    site = _apply_site(db, s, body, principal, creating=True)
     _upsert_credentials(db, s, body, ctx, creating=True)
     items = body.services
     if items is None and s.template_id:
@@ -350,10 +394,18 @@ def create_server(body: ServerIn, request: Request, principal: Principal = Depen
     db.flush()
     record_change(db, ctx, "server", s.id, s.hostname, "create", new=audit_view(s))
     audit(db, ctx, "server.create", entity_type="server", entity_id=s.id, entity_name=s.hostname, new=audit_view(s))
+    _audit_company(db, ctx, s, site)
     db.commit()
     version = _run_action(db, ctx, principal, body.action, f"Added server {s.hostname}")
     db.refresh(s)
     return ok({"server": server_payload(s, get_status(), detail=True), "version": version})
+
+
+def _audit_company(db: Session, ctx: AuditContext, s: Server, site: dict) -> None:
+    """Company changes are also audited under entity 'company' (visible to that company's users)."""
+    if site and site["old"].get("company") != site["new"].get("company"):
+        audit(db, ctx, "server.company", entity_type="company", entity_id=s.company_id, entity_name=s.hostname,
+              old={"company": site["old"]["company"]}, new={"company": site["new"]["company"]})
 
 
 # ---------------------------------------------------------------- update --
@@ -361,14 +413,17 @@ def create_server(body: ServerIn, request: Request, principal: Principal = Depen
 def update_server(server_id: int, body: ServerIn, request: Request,
                   principal: Principal = Depends(require("servers.edit")), db: Session = Depends(get_db)):
     ctx = ctx_from(request, principal)
-    s = get_or_404(db, Server, server_id, "server")
+    s = scope.get_visible_server(db, principal, server_id)
     if s.managed_by != "portal":
         raise ApiError(409, "read_only", "This server is managed in manual Nagios configuration (imported read-only). "
                                          "Use Import > Take over to manage it here.")
     if _hostname_taken(db, body.hostname, exclude_id=s.id):
         raise ApiError(409, "conflict", f"A server named '{body.hostname}' already exists")
+    if body.action in ("validate", "apply"):
+        scope.assert_can_run_pipeline(db, principal)
     old = audit_view(s)
     _apply_fields(db, s, body)
+    site = _apply_site(db, s, body, principal, creating=False)
     _upsert_credentials(db, s, body, ctx, creating=False)
     if body.services is not None:
         _sync_services(db, s, body.services, ctx)
@@ -382,6 +437,7 @@ def update_server(server_id: int, body: ServerIn, request: Request,
     if old != new:
         record_change(db, ctx, "server", s.id, s.hostname, "update", old=old, new=new)
     audit(db, ctx, "server.update", entity_type="server", entity_id=s.id, entity_name=s.hostname, old=old, new=new)
+    _audit_company(db, ctx, s, site)
     db.commit()
     version = _run_action(db, ctx, principal, body.action, f"Modified server {s.hostname}")
     db.refresh(s)
@@ -392,7 +448,9 @@ def update_server(server_id: int, body: ServerIn, request: Request,
 def delete_server(server_id: int, request: Request, apply: bool = False,
                   principal: Principal = Depends(require("servers.delete")), db: Session = Depends(get_db)):
     ctx = ctx_from(request, principal)
-    s = get_or_404(db, Server, server_id, "server")
+    s = scope.get_visible_server(db, principal, server_id)
+    if apply:
+        scope.assert_can_run_pipeline(db, principal)
     old = audit_view(s)
     s.deleted_at = utcnow()
     s.deleted_token = s.id
@@ -401,15 +459,22 @@ def delete_server(server_id: int, request: Request, apply: bool = False,
         record_change(db, ctx, "server", s.id, s.hostname, "delete", old=old)
     audit(db, ctx, "server.delete", entity_type="server", entity_id=s.id, entity_name=s.hostname, old=old)
     db.commit()
-    version = _run_action(db, ctx, principal, "apply" if apply else "save", f"Deleted server {s.hostname}")
+    try:
+        version = _run_action(db, ctx, principal, "apply" if apply else "save", f"Deleted server {s.hostname}")
+    except ApiError as exc:
+        if exc.code != "other_changes_pending":
+            raise
+        version = None  # deletion is saved; it will be applied with the next permitted apply
     return ok({"deleted": True, "version": version})
 
 
 def _toggle(db: Session, request: Request, principal: Principal, server_id: int, enabled: bool, action: str):
     ctx = ctx_from(request, principal)
-    s = get_or_404(db, Server, server_id, "server")
+    s = scope.get_visible_server(db, principal, server_id)
     if s.managed_by != "portal":
         raise ApiError(409, "read_only", "This server is managed in manual Nagios configuration")
+    if action in ("validate", "apply"):
+        scope.assert_can_run_pipeline(db, principal)
     if s.is_enabled == enabled:
         return ok({"server": server_payload(s, get_status()), "version": None})
     s.is_enabled = enabled
@@ -470,7 +535,7 @@ def _do_test(db: Session, body: ConnectionTestIn, server: Server | None) -> dict
 @router.post("/test-connection")
 def test_connection(body: ConnectionTestIn, request: Request, principal: Principal = Depends(require("servers.test")),
                     db: Session = Depends(get_db)):
-    server = get_or_404(db, Server, body.server_id, "server") if body.server_id else None
+    server = scope.get_visible_server(db, principal, body.server_id) if body.server_id else None
     res = _do_test(db, body, server)
     audit(db, ctx_from(request, principal), "server.test_connection", entity_type="server",
           entity_id=server.id if server else None, entity_name=server.hostname if server else body.address,
@@ -482,7 +547,7 @@ def test_connection(body: ConnectionTestIn, request: Request, principal: Princip
 @router.post("/{server_id}/test")
 def test_server(server_id: int, request: Request, principal: Principal = Depends(require("servers.test")),
                 db: Session = Depends(get_db)):
-    s = get_or_404(db, Server, server_id, "server")
+    s = scope.get_visible_server(db, principal, server_id)
     res = _do_test(db, ConnectionTestIn(address=s.address, monitoring_method=s.monitoring_method), s)
     c = next((c for c in s.credentials if c.credential_type == s.monitoring_method), None)
     if c:
@@ -497,7 +562,7 @@ def test_server(server_id: int, request: Request, principal: Principal = Depends
 @router.post("/{server_id}/validate")
 def validate_server(server_id: int, request: Request, principal: Principal = Depends(require("config.validate")),
                     db: Session = Depends(get_db)):
-    s = get_or_404(db, Server, server_id, "server")
+    s = scope.get_visible_server(db, principal, server_id)
     if s.config_state == "draft":
         s.config_state = "pending"
         db.commit()
@@ -508,7 +573,7 @@ def validate_server(server_id: int, request: Request, principal: Principal = Dep
 @router.post("/{server_id}/apply")
 def apply_server(server_id: int, request: Request, principal: Principal = Depends(require("config.apply")),
                  db: Session = Depends(get_db)):
-    s = get_or_404(db, Server, server_id, "server")
+    s = scope.get_visible_server(db, principal, server_id)
     if s.config_state == "draft":
         s.config_state = "pending"
         db.commit()
@@ -521,7 +586,7 @@ def apply_server(server_id: int, request: Request, principal: Principal = Depend
 def replace_services(server_id: int, items: list[ServiceItemIn], request: Request,
                      principal: Principal = Depends(require("servers.edit")), db: Session = Depends(get_db)):
     ctx = ctx_from(request, principal)
-    s = get_or_404(db, Server, server_id, "server")
+    s = scope.get_visible_server(db, principal, server_id)
     if s.managed_by != "portal":
         raise ApiError(409, "read_only", "This server is managed in manual Nagios configuration")
     old = audit_view(s)["services"]
@@ -542,7 +607,7 @@ def replace_services(server_id: int, items: list[ServiceItemIn], request: Reques
 def apply_template(server_id: int, template_id: int, request: Request, replace: bool = False,
                    principal: Principal = Depends(require("servers.edit")), db: Session = Depends(get_db)):
     ctx = ctx_from(request, principal)
-    s = get_or_404(db, Server, server_id, "server")
+    s = scope.get_visible_server(db, principal, server_id)
     tpl = get_or_404(db, MonitoringTemplate, template_id, "template")
     existing = [] if replace else [
         ServiceItemIn(id=ss.id, service_id=ss.service_id, service_description=ss.service_description, params=ss.params,
@@ -572,7 +637,7 @@ def apply_template(server_id: int, template_id: int, request: Request, replace: 
 @router.get("/{server_id}/performance")
 def performance(server_id: int, hours: int = Query(24, ge=1, le=24 * 90), service: str | None = Query(None, max_length=100),
                 principal: Principal = Depends(require("servers.view")), db: Session = Depends(get_db)):
-    s = get_or_404(db, Server, server_id, "server")
+    s = scope.get_visible_server(db, principal, server_id)
     since = utcnow() - timedelta(hours=hours)
     stmt = select(PerfSample).where(PerfSample.server_id == s.id, PerfSample.sampled_at >= since)
     if service:
@@ -599,15 +664,13 @@ def performance(server_id: int, hours: int = Query(24, ge=1, le=24 * 90), servic
 @router.get("/{server_id}/events")
 def server_events(server_id: int, limit: int = Query(200, ge=1, le=1000),
                   principal: Principal = Depends(require("servers.view")), db: Session = Depends(get_db)):
-    s = get_or_404(db, Server, server_id, "server")
+    s = scope.get_visible_server(db, principal, server_id)
     return ok(logparser.recent_events(limit=limit, host=s.hostname))
 
 
 @router.get("/{server_id}/history")
 def server_history(server_id: int, principal: Principal = Depends(require("servers.view")), db: Session = Depends(get_db)):
-    s = db.get(Server, server_id)
-    if s is None:
-        raise ApiError(404, "not_found", "server not found")
+    s = scope.get_visible_server(db, principal, server_id, include_deleted=True)
     logs = db.scalars(select(AuditLog).where(AuditLog.entity_type == "server", AuditLog.entity_id == s.id)
                       .order_by(AuditLog.occurred_at.desc()).limit(300))
     changes = db.scalars(select(ConfigurationChange).where(ConfigurationChange.entity_id == s.id,

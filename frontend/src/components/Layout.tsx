@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
-  Activity, AlertOctagon, Archive, Bell, BookOpen, CalendarClock, ChevronLeft, ClipboardList, Cog, Contact, Database, Eraser,
+  Activity, AlertOctagon, Archive, Bell, BookOpen, Building2, MapPin, CalendarClock, ChevronLeft, ClipboardList, Cog, Contact, Database, Eraser,
   FileCheck2, FileClock, FileText, Gauge, GitCompare, HeartPulse, KeyRound, LayoutDashboard, LayoutTemplate, ListChecks,
   LogOut, Menu, Moon, Network, Router, Server, Settings, Shield, Sun, TerminalSquare, Upload, Users, UsersRound,
 } from "lucide-react";
@@ -43,11 +43,13 @@ const SECTIONS: NavSection[] = [
     { to: "/reports/audit", label: "Audit", icon: <BookOpen size={16} />, perm: "audit.view" },
   ] },
   { title: "Administration", icon: <Shield size={13} />, items: [
+    { to: "/admin/companies", label: "Companies", icon: <Building2 size={16} />, perm: "companies.manage" },
+    { to: "/admin/locations", label: "Locations", icon: <MapPin size={16} />, perm: "locations.manage" },
     { to: "/admin/users", label: "Users", icon: <Users size={16} />, perm: "users.manage" },
     { to: "/admin/roles", label: "Roles", icon: <KeyRound size={16} />, perm: "users.manage" },
     { to: "/admin/notifications", label: "Notifications", icon: <Bell size={16} />, perm: "notifications.manage" },
     { to: "/admin/settings", label: "System Settings", icon: <Settings size={16} />, perm: "settings.manage" },
-    { to: "/admin/backups", label: "Backups", icon: <Archive size={16} />, perm: "config.view" },
+    { to: "/admin/backups", label: "Backups", icon: <Archive size={16} />, perm: "backups.manage" },
     { to: "/admin/import", label: "Import Configuration", icon: <Upload size={16} />, perm: "config.import" },
     { to: "/admin/health", label: "System Health", icon: <HeartPulse size={16} />, perm: "health.view" },
     { to: "/admin/cleanup", label: "Data Cleanup", icon: <Eraser size={16} />, perm: "maintenance.cleanup" },

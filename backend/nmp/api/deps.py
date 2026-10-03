@@ -45,11 +45,30 @@ class Principal:
     def role_names(self) -> list[str]:
         return [r.name for r in self.user.roles]
 
+    @property
+    def is_super(self) -> bool:
+        return "super_admin" in self.role_names
+
+    @property
+    def company_ids(self) -> frozenset[int]:
+        """Companies this user may monitor. Ignored for Super Admin (sees everything)."""
+        return frozenset(c.id for c in self.user.companies if c.is_active)
+
+    @property
+    def location_ids(self) -> frozenset[int]:
+        """Optional site restriction within those companies (empty = every site). Ignored for Super Admin."""
+        return frozenset(loc.id for loc in self.user.locations if loc.is_active)
+
 
 def user_permissions(user: User) -> frozenset[str]:
+    """Effective permissions. Super-Admin-only permissions count only for holders of the super_admin role."""
+    from ..security.rbac import SUPER_ADMIN_ONLY
+
     perms: set[str] = set()
     for r in user.roles:
         perms.update(p.code for p in r.permissions)
+    if not any(r.name == "super_admin" for r in user.roles):
+        perms -= SUPER_ADMIN_ONLY
     return frozenset(perms)
 
 

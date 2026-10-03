@@ -17,14 +17,15 @@ from ...models import ConfigurationChange, ConfigurationVersion, Server, User
 from ...nagios import external, logparser
 from ...nagios.status import HOST_STATES, get_status, host_state_name, service_state_name
 from ..deps import Principal, ctx_from, require
+from .. import scope
 from ..errors import ApiError
 from ..util import iso, ok, paginate, ts_iso
 
 router = APIRouter(tags=["monitoring"])
 
 
-def _server_index(db: Session) -> dict[str, Server]:
-    return {s.hostname: s for s in db.scalars(select(Server).where(Server.deleted_token == 0))}
+def _server_index(db: Session, principal: Principal) -> dict[str, Server]:
+    return {s.hostname: s for s in scope.scoped_servers(db, principal)}
 
 
 def _host_row(name: str, h: dict, idx: dict[str, Server], snap) -> dict:
@@ -57,8 +58,8 @@ def _service_row(host: str, desc: str, sv: dict, idx: dict[str, Server]) -> dict
 def mon_hosts(q: Optional[str] = Query(None, max_length=100), state: Optional[str] = Query(None, max_length=20),
               page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=500),
               principal: Principal = Depends(require("monitoring.view")), db: Session = Depends(get_db)):
-    snap = get_status()
-    idx = _server_index(db)
+    snap = scope.scoped_status(db, principal)
+    idx = _server_index(db, principal)
     rows = [_host_row(n, h, idx, snap) for n, h in snap.hosts.items()]
     if q:
         ql = q.lower()
@@ -77,8 +78,8 @@ def mon_services(q: Optional[str] = Query(None, max_length=100), state: Optional
                  host: Optional[str] = Query(None, max_length=64), page: int = Query(1, ge=1),
                  page_size: int = Query(50, ge=1, le=1000),
                  principal: Principal = Depends(require("monitoring.view")), db: Session = Depends(get_db)):
-    snap = get_status()
-    idx = _server_index(db)
+    snap = scope.scoped_status(db, principal)
+    idx = _server_index(db, principal)
     rows = [_service_row(h, d, sv, idx) for (h, d), sv in snap.services.items() if not host or h == host]
     if q:
         ql = q.lower()
@@ -96,8 +97,11 @@ def mon_services(q: Optional[str] = Query(None, max_length=100), state: Optional
 @router.get("/api/monitoring/problems")
 def mon_problems(include_handled: bool = False, hide_on_down_hosts: bool = True, principal: Principal = Depends(require("monitoring.view")),
                  db: Session = Depends(get_db)):
-    snap = get_status()
-    idx = _server_index(db)
+    return ok(_problems(db, principal, scope.scoped_status(db, principal), include_handled, hide_on_down_hosts))
+
+
+def _problems(db: Session, principal: Principal, snap, include_handled: bool, hide_on_down_hosts: bool) -> dict:
+    idx = _server_index(db, principal)
     hosts = [_host_row(n, h, idx, snap) for n, h in snap.hosts.items()
              if h.get("has_been_checked") and h.get("current_state", 0) != 0]
     down_hosts = {h["host_name"] for h in hosts}
@@ -110,12 +114,12 @@ def mon_problems(include_handled: bool = False, hide_on_down_hosts: bool = True,
     sev = {"DOWN": 0, "UNREACHABLE": 1, "CRITICAL": 0, "WARNING": 2, "UNKNOWN": 1}
     hosts.sort(key=lambda r: (sev.get(r["state"], 9), -(r["duration_seconds"] or 0)))
     services.sort(key=lambda r: (sev.get(r["state"], 9), -(r["duration_seconds"] or 0)))
-    return ok({"hosts": hosts, "services": services, "status_error": snap.error})
+    return {"hosts": hosts, "services": services, "status_error": snap.error}
 
 
 @router.get("/api/monitoring/downtimes")
-def mon_downtimes(principal: Principal = Depends(require("monitoring.view"))):
-    snap = get_status()
+def mon_downtimes(principal: Principal = Depends(require("monitoring.view")), db: Session = Depends(get_db)):
+    snap = scope.scoped_status(db, principal)
     out = []
     for d in snap.downtimes:
         out.append({"id": d.get("downtime_id"), "kind": d.get("kind"), "host_name": d.get("host_name"),
@@ -168,6 +172,7 @@ def _author(principal: Principal) -> str:
 @router.post("/api/monitoring/acknowledge")
 def acknowledge(body: AckIn, request: Request, principal: Principal = Depends(require("monitoring.acknowledge")),
                 db: Session = Depends(get_db)):
+    scope.assert_host(db, principal, body.host_name)
     try:
         cmd = external.acknowledge(body.host_name, body.service_description, _author(principal), body.comment,
                                    body.sticky, body.notify, body.persistent)
@@ -183,6 +188,7 @@ def acknowledge(body: AckIn, request: Request, principal: Principal = Depends(re
 def remove_ack(request: Request, host_name: str = Query(max_length=64),
                service_description: Optional[str] = Query(None, max_length=100), principal: Principal = Depends(require("monitoring.acknowledge")),
                db: Session = Depends(get_db)):
+    scope.assert_host(db, principal, host_name)
     try:
         external.remove_acknowledgement(host_name, service_description)
     except external.ExternalCommandError as exc:
@@ -196,6 +202,7 @@ def remove_ack(request: Request, host_name: str = Query(max_length=64),
 @router.post("/api/monitoring/downtime")
 def schedule_downtime(body: DowntimeIn, request: Request, principal: Principal = Depends(require("monitoring.downtime")),
                       db: Session = Depends(get_db)):
+    scope.assert_host(db, principal, body.host_name)
     start = int(body.start.replace(tzinfo=body.start.tzinfo or timezone.utc).timestamp())
     end = int(body.end.replace(tzinfo=body.end.tzinfo or timezone.utc).timestamp())
     try:
@@ -213,6 +220,9 @@ def schedule_downtime(body: DowntimeIn, request: Request, principal: Principal =
 @router.delete("/api/monitoring/downtime/{kind}/{downtime_id}")
 def cancel_downtime(kind: str, downtime_id: int, request: Request,
                     principal: Principal = Depends(require("monitoring.downtime")), db: Session = Depends(get_db)):
+    if not principal.is_super and not any(d.get("downtime_id") == downtime_id
+                                          for d in scope.scoped_status(db, principal).downtimes):
+        raise ApiError(404, "not_found", "downtime not found")
     try:
         external.delete_downtime(downtime_id, kind)
     except external.ExternalCommandError as exc:
@@ -226,6 +236,7 @@ def cancel_downtime(kind: str, downtime_id: int, request: Request,
 @router.post("/api/monitoring/recheck")
 def recheck(body: RecheckIn, request: Request, principal: Principal = Depends(require("monitoring.control")),
             db: Session = Depends(get_db)):
+    scope.assert_host(db, principal, body.host_name)
     try:
         external.recheck(body.host_name, body.service_description, body.all_services)
     except external.ExternalCommandError as exc:
@@ -237,9 +248,11 @@ def recheck(body: RecheckIn, request: Request, principal: Principal = Depends(re
 
 
 # ---------------------------------------------------------------- events --
-def config_events(db: Session, limit: int, since: datetime | None = None) -> list[dict]:
+def config_events(db: Session, limit: int, since: datetime | None = None, principal: Principal | None = None) -> list[dict]:
     stmt = select(ConfigurationVersion).where(ConfigurationVersion.status.in_(
         ("applied", "apply_failed", "validation_failed", "superseded", "rolled_back")))
+    if principal is not None and not principal.is_super:
+        stmt = stmt.where(ConfigurationVersion.created_by == principal.user.id)
     if since:
         stmt = stmt.where(ConfigurationVersion.created_at >= since.replace(tzinfo=None))
     out = []
@@ -263,20 +276,28 @@ def events(limit: int = Query(200, ge=1, le=2000), host: Optional[str] = Query(N
     if kind:
         kinds = {k.strip().upper() for k in kind.split(",") if k.strip()}
     rows = []
+    allowed = scope.hostnames(db, principal)
+    if host and not scope.host_allowed(allowed, host):
+        return ok([])
     if not kinds or kinds - {"CONFIG CHANGE"}:
-        rows = logparser.recent_events(limit=limit, host=host, kinds=(kinds - {"CONFIG CHANGE"}) if kinds else None,
-                                       since=since)
+        rows = logparser.recent_events(limit=limit if allowed is None else limit * 5, host=host,
+                                       kinds=(kinds - {"CONFIG CHANGE"}) if kinds else None, since=since)
+        if allowed is not None:
+            rows = [r for r in rows if r.get("host") in allowed]
     if (not kinds or "CONFIG CHANGE" in kinds) and not host:
-        rows += config_events(db, limit, since)
+        rows += config_events(db, limit, since, principal)
     rows.sort(key=lambda r: r["ts"], reverse=True)
     return ok(rows[:limit])
 
 
 # ------------------------------------------------------------- dashboard --
 @router.get("/api/dashboard")
-def dashboard(principal: Principal = Depends(require("dashboard.view")), db: Session = Depends(get_db)):
-    snap = get_status()
-    idx = _server_index(db)
+def dashboard(company_id: Optional[int] = None, location_id: Optional[int] = None,
+              principal: Principal = Depends(require("dashboard.view")), db: Session = Depends(get_db)):
+    snap = scope.scoped_status(db, principal, company_id, location_id)
+    idx = {h: s for h, s in _server_index(db, principal).items()
+           if (not company_id or s.company_id == (company_id if company_id > 0 else None))
+           and (not location_id or s.location_id == (location_id if location_id > 0 else None))}
     hs = {"total": 0, "UP": 0, "DOWN": 0, "UNREACHABLE": 0, "PENDING": 0}
     for h in snap.hosts.values():
         hs["total"] += 1
@@ -292,7 +313,7 @@ def dashboard(principal: Principal = Depends(require("dashboard.view")), db: Ses
     avail = availability_30d(snap)
     vals = [v for k, v in avail.items() if k in snap.hosts]
     availability = round(sum(vals) / len(vals), 3) if vals else None
-    problems = mon_problems(include_handled=False, hide_on_down_hosts=False, principal=principal, db=db)["data"]
+    problems = _problems(db, principal, snap, False, False)
     top = {
         "critical": [s for s in problems["services"] if s["state"] == "CRITICAL"][:10],
         "warning": [s for s in problems["services"] if s["state"] == "WARNING"][:10],
@@ -300,18 +321,32 @@ def dashboard(principal: Principal = Depends(require("dashboard.view")), db: Ses
         "down": [h for h in problems["hosts"] if h["state"] == "DOWN"][:10],
         "unreachable": [h for h in problems["hosts"] if h["state"] == "UNREACHABLE"][:10],
     }
-    recent = logparser.recent_events(limit=25, kinds={"HOST ALERT", "SERVICE ALERT"})
-    recent = [e for e in recent if e["state_type"] == "HARD"][:15]
-    recent += config_events(db, 10)
+    narrowed = principal.is_super and not company_id and not location_id
+    recent = logparser.recent_events(limit=25 if narrowed else 200, kinds={"HOST ALERT", "SERVICE ALERT"})
+    recent = [e for e in recent if e["state_type"] == "HARD" and (narrowed or e.get("host") in snap.hosts)][:15]
+    recent += config_events(db, 10, principal=principal)
     recent.sort(key=lambda r: r["ts"], reverse=True)
-    pending = db.query(ConfigurationChange).filter(ConfigurationChange.version_id.is_(None)).count()
+    from ...nagios import pipeline as _pl
+    pending = len(scope.split_pending(db, principal, _pl.pending_changes(db))[0])
+
+    def bump(bucket: dict, key, label, s):
+        e = bucket.setdefault(key, {"id": key, "name": label, "total": 0, "problems": 0})
+        e["total"] += 1
+        h = snap.hosts.get(s.hostname)
+        if h and h.get("has_been_checked") and h.get("current_state", 0) != 0:
+            e["problems"] += 1
+
     by_env: dict[str, dict] = {}
+    by_location: dict = {}
+    by_company: dict = {}
     for s in idx.values():
         e = by_env.setdefault(s.environment, {"total": 0, "problems": 0})
         e["total"] += 1
         h = snap.hosts.get(s.hostname)
         if h and h.get("has_been_checked") and h.get("current_state", 0) != 0:
             e["problems"] += 1
+        bump(by_location, s.location_id or -1, s.site.name if s.site else "Unassigned", s)
+        bump(by_company, s.company_id or -1, s.company.name if s.company else "No company", s)
     return ok({
         "hosts": hs, "services": ss, "availability_30d": availability, "top_problems": top,
         "recent_events": recent[:20], "pending_changes": pending, "inventory": {
@@ -319,7 +354,12 @@ def dashboard(principal: Principal = Depends(require("dashboard.view")), db: Ses
             "network_devices": sum(1 for s in idx.values() if s.device_type == "network_device"),
             "managed": sum(1 for s in idx.values() if s.managed_by == "portal"),
             "by_environment": by_env,
+            "by_location": sorted(by_location.values(), key=lambda x: -x["total"]),
+            "by_company": sorted(by_company.values(), key=lambda x: -x["total"]),
         },
+        "scope": {"super": principal.is_super, "company_id": company_id, "location_id": location_id,
+                  "companies": [{"id": c.id, "name": c.name} for c in principal.user.companies if c.is_active],
+                  "locations": [{"id": l.id, "name": l.name} for l in principal.user.locations if l.is_active]},
         "nagios": {"status_error": snap.error, "program_start": ts_iso(snap.program.get("program_start")),
                    "pid": snap.program.get("nagios_pid"), "status_age_seconds":
                        int(datetime.now(timezone.utc).timestamp() - snap.mtime) if snap.mtime else None},

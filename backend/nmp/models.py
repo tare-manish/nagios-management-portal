@@ -106,6 +106,8 @@ class User(TimestampMixin, Base):
     created_by: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"))
     updated_by: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"))
     roles: Mapped[list[Role]] = relationship(secondary="user_roles", lazy="selectin")
+    companies: Mapped[list["Company"]] = relationship(secondary="user_companies", lazy="selectin", order_by="Company.name")
+    locations: Mapped[list["Location"]] = relationship(secondary="user_locations", lazy="selectin", order_by="Location.name")
 
 
 class UserRole(Base):
@@ -132,6 +134,43 @@ class RateLimitBucket(Base):
     bucket_key: Mapped[str] = mapped_column(String(190), primary_key=True)
     window_start: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     hits: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+# ------------------------------------------------- companies & locations ----
+class Company(AuditMixin, Base):
+    """A group company. Managed by Super Admin; other users see only the companies assigned to them.
+
+    Companies are never hard-deleted (configuration snapshots reference them); retire with is_active=False.
+    """
+    __tablename__ = "companies"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
+    code: Mapped[str] = mapped_column(String(16), unique=True, nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(String(255))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class Location(AuditMixin, Base):
+    """A site (Daman, Vapi, ...). Optionally narrows a user's companies to particular sites."""
+    __tablename__ = "locations"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    code: Mapped[str] = mapped_column(String(16), unique=True, nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(String(255))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class UserCompany(Base):
+    """Companies a non-Super-Admin user may monitor (one or several)."""
+    __tablename__ = "user_companies"
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), primary_key=True)
+
+
+class UserLocation(Base):
+    __tablename__ = "user_locations"
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    location_id: Mapped[int] = mapped_column(ForeignKey("locations.id", ondelete="CASCADE"), primary_key=True)
 
 
 # ------------------------------------------------------------ inventory -----
@@ -261,6 +300,8 @@ class Server(AuditMixin, Base):
     monitoring_method: Mapped[str] = mapped_column(Enum(*MON_METHODS, name="mon_method"), nullable=False)
     host_check: Mapped[str] = mapped_column(String(16), default="agent", nullable=False)  # agent | ping
     template_id: Mapped[Optional[int]] = mapped_column(ForeignKey("monitoring_templates.id", ondelete="SET NULL"))
+    company_id: Mapped[Optional[int]] = mapped_column(ForeignKey("companies.id", ondelete="RESTRICT"), index=True)
+    location_id: Mapped[Optional[int]] = mapped_column(ForeignKey("locations.id", ondelete="RESTRICT"), index=True)
     check_interval: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
     retry_interval: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     max_check_attempts: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
@@ -284,6 +325,8 @@ class Server(AuditMixin, Base):
         back_populates="server", cascade="all, delete-orphan", lazy="selectin",
         order_by="ServerService.service_description")
     template: Mapped[Optional[MonitoringTemplate]] = relationship(lazy="joined")
+    company: Mapped[Optional[Company]] = relationship(lazy="joined")
+    site: Mapped[Optional[Location]] = relationship(lazy="joined")
 
     @property
     def nagios_key(self) -> str:

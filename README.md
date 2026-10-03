@@ -114,7 +114,7 @@ sudo ./uninstall-nagios-management.sh --remove-managed --drop-database --purge  
 cd backend
 python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 export NMP_TEST_DATABASE_URL='mysql+pymysql://USER:PASS@localhost/nagios_mgmt_test?charset=utf8mb4'
-.venv/bin/pytest            # 148 tests. Nagios integration tests run when a real Nagios is present.
+.venv/bin/pytest            # 160 tests. Nagios integration tests run when a real Nagios is present.
 ```
 
 The integration suite (`tests/test_pipeline_nagios.py`) exercises the full workflow against a real Nagios daemon: add Windows server → NCPA → template → generate → validate → apply → reload → host appears → services checked through the NCPA wrapper. It also covers modify, disable, delete, validation failure, rollback, invalid credentials, importing existing hosts, backups and emergency restore. Run it on a **test copy** of the server, not production. The fixture restores `/usr/local/nagios/etc` afterwards.

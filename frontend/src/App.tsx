@@ -12,7 +12,7 @@ import ServerDetail from "./pages/ServerDetail";
 import { CommandsPage, ContactGroupsPage, ContactsPage, HostGroupsPage, ServiceDefsPage, TemplatesPage } from "./pages/Catalog";
 import { PendingPage, VersionDetail, VersionsPage } from "./pages/Config";
 import { AuditReport, AvailabilityReport, HealthReport, PerformanceReport, SlaReport } from "./pages/Reports";
-import { BackupsPage, DataCleanupPage, ImportPage, NotificationsPage, RolesPage, SettingsPage, SystemHealthPage, UsersPage } from "./pages/Admin";
+import { BackupsPage, CompaniesPage, DataCleanupPage, ImportPage, LocationsPage, NotificationsPage, RolesPage, SettingsPage, SystemHealthPage, UsersPage } from "./pages/Admin";
 
 function Login() {
   const { login } = useAuth();
@@ -108,6 +108,8 @@ export default function App() {
         <Route path="admin/import" element={<ImportPage />} />
         <Route path="admin/health" element={<SystemHealthPage />} />
         <Route path="admin/cleanup" element={<DataCleanupPage />} />
+        <Route path="admin/companies" element={<CompaniesPage />} />
+        <Route path="admin/locations" element={<LocationsPage />} />
         <Route path="account" element={<ChangePassword />} />
         <Route path="*" element={<div className="empty">Page not found</div>} />
       </Route>

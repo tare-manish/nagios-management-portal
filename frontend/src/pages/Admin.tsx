@@ -19,7 +19,8 @@ function SaveModal({ title, onClose, onSave, children, size }: { title: string; 
   );
 }
 
-const SUPER_ADMIN_ONLY = ["maintenance.cleanup"];
+const SUPER_ADMIN_ONLY = ["maintenance.cleanup", "companies.manage", "locations.manage", "templates.manage", "catalog.manage",
+  "contacts.manage", "groups.manage", "notifications.manage", "config.rollback", "config.import", "backups.manage"];
 
 /* Users --------------------------------------------------------------------- */
 export function UsersPage() {
@@ -28,12 +29,20 @@ export function UsersPage() {
   const { confirm, toast, apiError } = useUi();
   const users = useQuery({ queryKey: ["users"], queryFn: () => api.get("/api/users") });
   const roles = useQuery({ queryKey: ["roles"], queryFn: () => api.get("/api/roles") });
+  const locations = useQuery({ queryKey: ["locations"], queryFn: () => api.get("/api/locations") });
+  const companies = useQuery({ queryKey: ["companies"], queryFn: () => api.get("/api/companies") });
   const [edit, setEdit] = useState<any>(null);
   const refresh = () => qc.invalidateQueries({ queryKey: ["users"] });
   const cols: Column<any>[] = [
     { key: "username", header: "Username", render: (u) => <><strong>{u.username}</strong>{u.id === me?.id && <span className="badge info" style={{ marginLeft: 6 }}>You</span>}</> },
     { key: "full_name", header: "Name" }, { key: "email", header: "E-mail" },
     { key: "roles", header: "Roles", sortable: false, render: (u) => u.roles.map((r: any) => <span className="tag" key={r.id}>{r.display_name}</span>) },
+    { key: "companies", header: "Companies", sortable: false, render: (u) => u.roles.some((r: any) => r.name === "super_admin")
+      ? <span className="faint small">All (Super Admin)</span>
+      : u.companies.length ? u.companies.map((c: any) => <span className="tag" key={c.id}>{c.name}</span>) : <span className="badge warning">None - sees no servers</span> },
+    { key: "locations", header: "Sites", sortable: false, render: (u) => u.roles.some((r: any) => r.name === "super_admin")
+      ? <span className="faint small">All</span>
+      : u.locations.length ? u.locations.map((l: any) => <span className="tag" key={l.id}>{l.name}</span>) : <span className="faint small">All sites</span> },
     { key: "is_active", header: "Status", render: (u) => (u.locked ? <span className="badge critical">Locked</span> : u.is_active ? <span className="badge good">Active</span> : <span className="badge">Disabled</span>) },
     { key: "last_login_at", header: "Last login", render: (u) => <span className="small">{fmtDate(u.last_login_at)}{u.last_login_ip && <span className="faint"> from {u.last_login_ip}</span>}</span> },
     { key: "a", header: "", sortable: false, className: "actions", render: (u) => (
@@ -45,15 +54,18 @@ export function UsersPage() {
   ];
   return (
     <div>
-      <PageHeader title="Users" actions={<button className="btn primary" onClick={() => setEdit({ roles: [], is_active: true })}><Plus size={15} />New user</button>} />
+      <PageHeader title="Users" subtitle="Super Admin sees every company. Every other user sees only the servers of the companies assigned here (optionally only at some sites)."
+        actions={<button className="btn primary" onClick={() => setEdit({ roles: [], companies: [], locations: [], is_active: true })}><Plus size={15} />New user</button>} />
       <ErrorBox error={users.error} />
       <Card flush>{users.isLoading ? <Loading /> : <DataTable rows={users.data?.data ?? []} columns={cols} rowKey={(u) => u.id} />}</Card>
-      {edit && <UserForm item={edit} roles={roles.data?.data ?? []} onClose={() => setEdit(null)} onSaved={refresh} />}
+      {edit && <UserForm item={edit} roles={roles.data?.data ?? []} locations={locations.data?.data ?? []} companies={companies.data?.data ?? []} onClose={() => setEdit(null)} onSaved={refresh} />}
     </div>
   );
 }
-function UserForm({ item, roles, onClose, onSaved }: any) {
-  const [v, setV] = useState({ username: item.username ?? "", full_name: item.full_name ?? "", email: item.email ?? "", is_active: item.is_active ?? true, role_ids: item.roles.map((r: any) => r.id), password: "", must_change_password: true });
+function UserForm({ item, roles, locations, companies, onClose, onSaved }: any) {
+  const [v, setV] = useState({ username: item.username ?? "", full_name: item.full_name ?? "", email: item.email ?? "", is_active: item.is_active ?? true, role_ids: item.roles.map((r: any) => r.id), company_ids: (item.companies ?? []).map((c: any) => c.id) as number[], location_ids: (item.locations ?? []).map((l: any) => l.id) as number[], password: "", must_change_password: true });
+  const superRole = roles.find((r: any) => r.name === "super_admin");
+  const isSuperUser = !!superRole && v.role_ids.includes(superRole.id);
   return (
     <SaveModal title={item.id ? `Edit ${item.username}` : "New user"} onClose={onClose} onSave={async () => {
       const body = { ...v, email: v.email || null, password: v.password || null };
@@ -66,6 +78,15 @@ function UserForm({ item, roles, onClose, onSaved }: any) {
         <Field label="E-mail"><input className="input" type="email" value={v.email} onChange={(e) => setV({ ...v, email: e.target.value })} /></Field>
         <Field label={item.id ? "Reset password" : "Initial password"} required={!item.id} hint="12+ characters, 3 of: lower, upper, digit, symbol"><input className="input" type="password" autoComplete="new-password" value={v.password} onChange={(e) => setV({ ...v, password: e.target.value })} /></Field>
         <Field label="Roles" span2><div className="row">{roles.map((r: any) => <Checkbox key={r.id} checked={v.role_ids.includes(r.id)} label={r.display_name} onChange={(c) => setV({ ...v, role_ids: c ? [...v.role_ids, r.id] : v.role_ids.filter((x: number) => x !== r.id) })} />)}</div></Field>
+        <Field label="Companies" span2 hint={isSuperUser ? "Super Admin always sees every company." : "The user monitors and manages only servers of these companies. Tick several for a multi-company administrator."}>
+          {isSuperUser ? <span className="faint">All companies</span> : <div className="row">{companies.filter((c: any) => c.is_active || v.company_ids.includes(c.id)).map((c: any) => (
+            <Checkbox key={c.id} checked={v.company_ids.includes(c.id)} label={c.name} onChange={(on) => setV({ ...v, company_ids: on ? [...v.company_ids, c.id] : v.company_ids.filter((x) => x !== c.id) })} />))}</div>}
+          {!isSuperUser && v.company_ids.length === 0 && <div className="small" style={{ color: "var(--warning-text)", marginTop: 6 }}>No company selected: this user will not see any servers.</div>}
+        </Field>
+        {!isSuperUser && <Field label="Limit to sites (optional)" span2 hint="Leave all unticked to see these companies at every site. Tick sites to see only those, e.g. only Daman.">
+          <div className="row">{locations.filter((l: any) => l.is_active || v.location_ids.includes(l.id)).map((l: any) => (
+            <Checkbox key={l.id} checked={v.location_ids.includes(l.id)} label={l.name} onChange={(c) => setV({ ...v, location_ids: c ? [...v.location_ids, l.id] : v.location_ids.filter((x) => x !== l.id) })} />))}</div>
+        </Field>}
         <Checkbox checked={v.is_active} onChange={(c) => setV({ ...v, is_active: c })} label="Active" />
         {v.password && <Checkbox checked={v.must_change_password} onChange={(c) => setV({ ...v, must_change_password: c })} label="Require password change at next login" />}
       </div>
@@ -482,3 +503,57 @@ export function DataCleanupPage() {
     </div>
   );
 }
+
+/* Companies & locations (Super Admin) --------------------------------------- */
+function OrgPage({ kind }: { kind: "company" | "location" }) {
+  const qc = useQueryClient();
+  const { toast } = useUi();
+  const url = kind === "company" ? "/api/companies" : "/api/locations";
+  const key = kind === "company" ? "companies" : "locations";
+  const q = useQuery({ queryKey: [key], queryFn: () => api.get(url) });
+  const [edit, setEdit] = useState<any>(null);
+  const label = kind === "company" ? "Company" : "Location";
+  const cols: Column<any>[] = [
+    { key: "name", header: label, render: (o) => <><strong>{o.name}</strong>{o.description && <div className="faint small">{o.description}</div>}</> },
+    { key: "code", header: "Code", render: (o) => <span className="mono">{o.code}</span> },
+    { key: "servers", header: "Servers", className: "num" },
+    { key: "users", header: "Users", className: "num" },
+    { key: "is_active", header: "Status", render: (o) => (o.is_active ? <span className="badge good">Active</span> : <span className="badge">Retired</span>) },
+    { key: "a", header: "", sortable: false, className: "actions", render: (o) => <button className="btn sm ghost" title="Edit" onClick={() => setEdit(o)}><Pencil size={14} /></button> },
+  ];
+  const unassigned = q.data?.meta?.unassigned_servers ?? 0;
+  return (
+    <div className="stack">
+      <PageHeader title={kind === "company" ? "Companies" : "Locations"}
+        subtitle={kind === "company"
+          ? "Group companies. Assign companies to users under Administration → Users: they then see and manage only those companies' servers."
+          : "Sites. Optionally limit a user to some sites of their companies (Administration → Users)."}
+        actions={<button className="btn primary" onClick={() => setEdit({ is_active: true })}><Plus size={15} />New {label.toLowerCase()}</button>} />
+      {unassigned > 0 && <Alert kind="info">{unassigned} server(s) have no {label.toLowerCase()} yet{kind === "company" ? " and are visible to Super Admin only" : ""}. Assign it on the server's Edit page.</Alert>}
+      <ErrorBox error={q.error} />
+      <Card flush>{q.isLoading ? <Loading /> : <DataTable rows={q.data?.data ?? []} columns={cols} rowKey={(o) => o.id} empty={`No ${key} yet`} />}</Card>
+      <div className="faint small">{kind === "company" ? "Companies" : "Locations"} are never deleted, because configuration history refers to them. Mark one as retired to hide it from new assignments.</div>
+      {edit && <OrgForm kind={kind} item={edit} url={url} onClose={() => setEdit(null)} onSaved={() => { qc.invalidateQueries({ queryKey: [key] }); toast("success", `${label} saved`); }} />}
+    </div>
+  );
+}
+function OrgForm({ kind, item, url, onClose, onSaved }: any) {
+  const [v, setV] = useState({ name: item.name ?? "", code: item.code ?? "", description: item.description ?? "", is_active: item.is_active ?? true });
+  const label = kind === "company" ? "company" : "location";
+  return (
+    <SaveModal title={item.id ? `Edit ${item.name}` : `New ${label}`} onClose={onClose} onSave={async () => {
+      const body = { ...v, description: v.description || null };
+      if (item.id) await api.put(`${url}/${item.id}`, body); else await api.post(url, body);
+      onSaved();
+    }}>
+      <div className="form-grid">
+        <Field label="Name" required hint={kind === "company" ? "e.g. Acme Pharma Ltd" : "e.g. Head Office"}><input className="input" value={v.name} maxLength={kind === "company" ? 120 : 64} onChange={(e) => setV({ ...v, name: e.target.value })} autoFocus /></Field>
+        <Field label="Short code" required hint="2-16 letters/digits, e.g. ACME"><input className="input mono" value={v.code} maxLength={16} onChange={(e) => setV({ ...v, code: e.target.value.toUpperCase() })} /></Field>
+        <Field label="Description" span2><input className="input" value={v.description} maxLength={255} onChange={(e) => setV({ ...v, description: e.target.value })} /></Field>
+        <Checkbox checked={v.is_active} onChange={(c) => setV({ ...v, is_active: c })} label={`Active (untick to retire this ${label})`} />
+      </div>
+    </SaveModal>
+  );
+}
+export const CompaniesPage = () => <OrgPage kind="company" />;
+export const LocationsPage = () => <OrgPage kind="location" />;

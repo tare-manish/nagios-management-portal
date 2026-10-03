@@ -6,6 +6,7 @@ import { api, download } from "../lib/api";
 import { ENVIRONMENTS, envLabel, fmtDate, pct } from "../lib/format";
 import { Card, DataTable, ErrorBox, Kpi, Loading, Meter, PageHeader, type Column } from "../components/ui";
 import { ChangeDiff } from "./ServerDetail";
+import { useAuth } from "../lib/auth";
 import { RankBars, StatusBar } from "../components/charts";
 
 const availTone = (v: number) => (v >= 99.9 ? "good" : v >= 99 ? "warning" : "critical") as "good" | "warning" | "critical";
@@ -28,6 +29,30 @@ function usePeriod(defDays = 30) {
   return { params, ui, key: `${days}-${from}-${to}` };
 }
 
+function useOrgFilter() {
+  const { user } = useAuth();
+  const isSuper = !!user?.is_super;
+  const [company, setCompany] = useState("");
+  const [location, setLocation] = useState("");
+  const companies = useQuery({ queryKey: ["companies"], queryFn: () => api.get("/api/companies") });
+  const multiCo = isSuper || (companies.data?.data ?? []).length > 1;
+  const locations = useQuery({ queryKey: ["locations"], queryFn: () => api.get("/api/locations") });
+  const locs: any[] = locations.data?.data ?? [];
+  const ui = (
+    <>
+      {multiCo && <select className="input" aria-label="Company" value={company} onChange={(e) => setCompany(e.target.value)}>
+        <option value="">{isSuper ? "All companies" : "All my companies"}</option>{(companies.data?.data ?? []).map((c: any) => <option key={c.id} value={c.id}>{c.name}</option>)}{isSuper && <option value="-1">No company</option>}</select>}
+      {(isSuper || locs.length > 1) && <select className="input" aria-label="Location" value={location} onChange={(e) => setLocation(e.target.value)}>
+        <option value="">{isSuper ? "All locations" : "All my locations"}</option>{locs.map((l: any) => <option key={l.id} value={l.id}>{l.name}</option>)}{isSuper && <option value="-1">Not assigned</option>}</select>}
+    </>
+  );
+  const orgCols: Column<any>[] = [
+    ...(multiCo ? [{ key: "company", header: "Company", render: (r: any) => r.company ?? <span className="faint">-</span> } as Column<any>] : []),
+    { key: "location", header: "Location", render: (r: any) => r.location ?? <span className="faint">-</span> },
+  ];
+  return { params: { company_id: company || undefined, location_id: location || undefined }, ui, key: `${company}-${location}`, orgCols };
+}
+
 function exportUrl(base: string, params: Record<string, any>) {
   const qs = new URLSearchParams(Object.entries({ ...params, format: "csv" }).filter(([, v]) => v !== undefined && v !== "").map(([k, v]) => [k, String(v)]));
   return `${base}?${qs}`;
@@ -40,13 +65,14 @@ function ReportActions({ csv }: { csv: string }) {
 export function AvailabilityReport() {
   const nav = useNavigate();
   const p = usePeriod(30);
+  const org = useOrgFilter();
   const [env, setEnv] = useState("");
   const [view, setView] = useState<"hosts" | "services">("hosts");
-  const params = { ...p.params, environment: env };
-  const q = useQuery({ queryKey: ["rep-av", view, p.key, env], queryFn: () => api.get(view === "hosts" ? "/api/reports/availability" : "/api/reports/service-availability", params) });
+  const params = { ...p.params, ...org.params, environment: env };
+  const q = useQuery({ queryKey: ["rep-av", view, p.key, env, org.key], queryFn: () => api.get(view === "hosts" ? "/api/reports/availability" : "/api/reports/service-availability", params) });
   const rows: any[] = q.data?.data ?? [];
   const hostCols: Column<any>[] = [
-    { key: "hostname", header: "Server", render: (r) => <Link to={`/servers/${r.server_id}`}>{r.hostname}</Link> }, { key: "display_name", header: "Name" },
+    { key: "hostname", header: "Server", render: (r) => <Link to={`/servers/${r.server_id}`}>{r.hostname}</Link> }, { key: "display_name", header: "Name" }, ...org.orgCols,
     { key: "environment", header: "Environment", render: (r) => envLabel(r.environment) },
     { key: "availability_pct", header: "Availability", render: (r) => (r.availability_pct == null ? <span className="faint">no data</span> : <span className={r.availability_pct < 99 ? "" : ""}>{pct(r.availability_pct, 3)}</span>) },
     { key: "downtime_minutes", header: "Downtime (min)", className: "num" }, { key: "undetermined_minutes", header: "No data (min)", className: "num" },
@@ -63,7 +89,7 @@ export function AvailabilityReport() {
       <PageHeader title="Availability report" subtitle="Calculated from Nagios HARD state history (event log and archives)." actions={<ReportActions csv={exportUrl(view === "hosts" ? "/api/reports/availability" : "/api/reports/service-availability", params)} />} />
       <div className="toolbar">
         <div className="btn-group"><button className={`btn sm ${view === "hosts" ? "active" : ""}`} onClick={() => setView("hosts")}>Servers</button><button className={`btn sm ${view === "services" ? "active" : ""}`} onClick={() => setView("services")}>Services</button></div>
-        {p.ui}
+        {p.ui}{org.ui}
         <select className="input" value={env} onChange={(e) => setEnv(e.target.value)}><option value="">All environments</option>{ENVIRONMENTS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</select>
       </div>
       <ErrorBox error={q.error} />
@@ -92,11 +118,12 @@ export function AvailabilityReport() {
 
 export function SlaReport() {
   const p = usePeriod(30);
+  const org = useOrgFilter();
   const [env, setEnv] = useState("");
-  const params = { ...p.params, environment: env };
-  const q = useQuery({ queryKey: ["rep-sla", p.key, env], queryFn: () => api.get("/api/reports/sla", params) });
+  const params = { ...p.params, ...org.params, environment: env };
+  const q = useQuery({ queryKey: ["rep-sla", p.key, env, org.key], queryFn: () => api.get("/api/reports/sla", params) });
   const cols: Column<any>[] = [
-    { key: "hostname", header: "Server", render: (r) => <Link to={`/servers/${r.server_id}`}>{r.hostname}</Link> },
+    { key: "hostname", header: "Server", render: (r) => <Link to={`/servers/${r.server_id}`}>{r.hostname}</Link> }, ...org.orgCols,
     { key: "environment", header: "Environment", render: (r) => envLabel(r.environment) },
     { key: "target_pct", header: "Target", render: (r) => pct(r.target_pct, 2) },
     { key: "availability_pct", header: "Actual", render: (r) => pct(r.availability_pct, 3) },
@@ -107,7 +134,7 @@ export function SlaReport() {
   return (
     <div className="stack">
       <PageHeader title="SLA report" subtitle="Availability against the per-environment targets in System Settings." actions={<ReportActions csv={exportUrl("/api/reports/sla", params)} />} />
-      <div className="toolbar">{p.ui}<select className="input" value={env} onChange={(e) => setEnv(e.target.value)}><option value="">All environments</option>{ENVIRONMENTS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</select></div>
+      <div className="toolbar">{p.ui}{org.ui}<select className="input" value={env} onChange={(e) => setEnv(e.target.value)}><option value="">All environments</option>{ENVIRONMENTS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</select></div>
       <ErrorBox error={q.error} />
       {m && (m.met + m.breached) > 0 && <Card title="SLA compliance">
         <StatusBar total={(q.data?.data ?? []).length} caption={<span className="muted small">{m.met} of {(q.data?.data ?? []).length} servers met their target</span>} parts={[
@@ -124,16 +151,17 @@ export function SlaReport() {
 
 export function PerformanceReport() {
   const p = usePeriod(7);
+  const org = useOrgFilter();
   const [env, setEnv] = useState("");
-  const params = { ...p.params, environment: env };
-  const q = useQuery({ queryKey: ["rep-perf", p.key, env], queryFn: () => api.get("/api/reports/performance", params) });
+  const params = { ...p.params, ...org.params, environment: env };
+  const q = useQuery({ queryKey: ["rep-perf", p.key, env, org.key], queryFn: () => api.get("/api/reports/performance", params) });
   const nav = useNavigate();
   const m = (v: any) => <Meter value={v} />;
   const prow: any[] = q.data?.data ?? [];
   const top = (key: string) => [...prow].filter((r) => r[key] != null).sort((a, b) => b[key] - a[key]).map((r) => ({
     key: r.server_id, label: r.hostname, sub: `avg ${Math.round(r[key.replace("_max", "_avg")] ?? 0)}%`, value: +(+r[key]).toFixed(1), tone: utilTone(r[key]) }));
   const cols: Column<any>[] = [
-    { key: "hostname", header: "Server", render: (r) => <Link to={`/servers/${r.server_id}?tab=performance`}>{r.hostname}</Link> },
+    { key: "hostname", header: "Server", render: (r) => <Link to={`/servers/${r.server_id}?tab=performance`}>{r.hostname}</Link> }, ...org.orgCols,
     { key: "environment", header: "Environment", render: (r) => envLabel(r.environment) },
     { key: "cpu_avg", header: "CPU avg", render: (r) => m(r.cpu_avg) }, { key: "cpu_max", header: "CPU max", render: (r) => m(r.cpu_max) },
     { key: "memory_avg", header: "Memory avg", render: (r) => m(r.memory_avg) }, { key: "memory_max", header: "Memory max", render: (r) => m(r.memory_max) },
@@ -142,7 +170,7 @@ export function PerformanceReport() {
   return (
     <div className="stack">
       <PageHeader title="Performance report" subtitle="Average and peak utilisation from sampled performance data." actions={<ReportActions csv={exportUrl("/api/reports/performance", params)} />} />
-      <div className="toolbar">{p.ui}<select className="input" value={env} onChange={(e) => setEnv(e.target.value)}><option value="">All environments</option>{ENVIRONMENTS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</select></div>
+      <div className="toolbar">{p.ui}{org.ui}<select className="input" value={env} onChange={(e) => setEnv(e.target.value)}><option value="">All environments</option>{ENVIRONMENTS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</select></div>
       <ErrorBox error={q.error} />
       {prow.length > 0 && <div className="grid grid-3">
         {[["cpu_max", "Peak CPU"], ["memory_max", "Peak memory"], ["disk_max", "Fullest disk"]].map(([k, t]) => (
@@ -158,7 +186,8 @@ export function PerformanceReport() {
 
 export function HealthReport() {
   const [days, setDays] = useState(7);
-  const q = useQuery({ queryKey: ["rep-health", days], queryFn: () => api.get("/api/reports/health", { days }) });
+  const org = useOrgFilter();
+  const q = useQuery({ queryKey: ["rep-health", days, org.key], queryFn: () => api.get("/api/reports/health", { days, ...org.params }) });
   const d = q.data?.data;
   const list = (title: string, rows: any[], unit: string) => (
     <Card title={`${title} (${rows.length})`} flush>
@@ -171,8 +200,8 @@ export function HealthReport() {
   return (
     <div className="stack">
       <PageHeader title="Infrastructure health" subtitle={d && `Thresholds: CPU ${d.thresholds.cpu}%, memory ${d.thresholds.memory}%, disk ${d.thresholds.disk}% (System Settings)`}
-        actions={<ReportActions csv={`/api/reports/health?format=csv&days=${days}`} />} />
-      <div className="toolbar"><span className="muted">Repeated failures in the last</span><select className="input" value={days} onChange={(e) => setDays(Number(e.target.value))}>{[1, 7, 30].map((n) => <option key={n} value={n}>{n} day(s)</option>)}</select></div>
+        actions={<ReportActions csv={exportUrl("/api/reports/health", { days, ...org.params })} />} />
+      <div className="toolbar">{org.ui}<span className="muted">Repeated failures in the last</span><select className="input" value={days} onChange={(e) => setDays(Number(e.target.value))}>{[1, 7, 30].map((n) => <option key={n} value={n}>{n} day(s)</option>)}</select></div>
       <ErrorBox error={q.error} />
       {q.isLoading ? <Loading /> : <div className="grid grid-2">
         {list("High disk usage", d.high_disk, "%")}{list("High memory usage", d.high_memory, "%")}

@@ -16,6 +16,12 @@ from ...models import (Command, Contact, ContactGroup, MonitoringTemplate, Serve
                        TemplateService)
 from ...nagios.legacy import load_legacy
 from ..deps import Principal, ctx_from, require
+from .. import scope
+
+
+def _scoped(stmt, principal: Principal):
+    cond = scope.server_filter(principal)
+    return stmt if cond is None else stmt.where(cond)
 from ..errors import ApiError
 from ..util import get_or_404, iso, ok
 
@@ -185,7 +191,8 @@ def service_def_payload(s: Service, usage: int | None = None) -> dict:
 
 @router.get("/api/services")
 def list_service_defs(principal: Principal = Depends(require("templates.view")), db: Session = Depends(get_db)):
-    usage = dict(db.execute(select(ServerService.service_id, func.count()).group_by(ServerService.service_id)).all())
+    usage = dict(db.execute(_scoped(select(ServerService.service_id, func.count()).join(Server, Server.id == ServerService.server_id)
+                                    .where(Server.deleted_token == 0), principal).group_by(ServerService.service_id)).all())
     return ok([service_def_payload(s, usage.get(s.id, 0)) for s in db.scalars(select(Service).order_by(Service.category, Service.name))],
               {"param_types": PARAM_TYPES})
 
@@ -353,7 +360,7 @@ def _set_items(db: Session, t: MonitoringTemplate, items: list[TemplateItemIn]) 
 
 @router.get("/api/templates")
 def list_templates(principal: Principal = Depends(require("templates.view")), db: Session = Depends(get_db)):
-    usage = dict(db.execute(select(Server.template_id, func.count()).where(Server.deleted_token == 0)
+    usage = dict(db.execute(_scoped(select(Server.template_id, func.count()).where(Server.deleted_token == 0), principal)
                             .group_by(Server.template_id)).all())
     return ok([template_payload(t, usage.get(t.id, 0)) for t in db.scalars(select(MonitoringTemplate).order_by(MonitoringTemplate.name))])
 
@@ -437,8 +444,8 @@ def group_payload(g: ServerGroup, members: int = 0) -> dict:
 @router.get("/api/hostgroups")
 def list_groups(principal: Principal = Depends(require("servers.view")), db: Session = Depends(get_db)):
     from ...models import ServerGroupMember
-    counts = dict(db.execute(select(ServerGroupMember.group_id, func.count()).join(Server, Server.id == ServerGroupMember.server_id)
-                             .where(Server.deleted_token == 0).group_by(ServerGroupMember.group_id)).all())
+    counts = dict(db.execute(_scoped(select(ServerGroupMember.group_id, func.count()).join(Server, Server.id == ServerGroupMember.server_id)
+                             .where(Server.deleted_token == 0), principal).group_by(ServerGroupMember.group_id)).all())
     return ok([group_payload(g, counts.get(g.id, 0)) for g in db.scalars(select(ServerGroup).order_by(ServerGroup.name))])
 
 

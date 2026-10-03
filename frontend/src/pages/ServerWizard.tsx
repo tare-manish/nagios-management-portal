@@ -45,7 +45,8 @@ export default function ServerWizard({ network }: { network?: boolean }) {
   const { id } = useParams();
   const editing = !!id;
   const nav = useNavigate();
-  const { can } = useAuth();
+  const { can, user } = useAuth();
+  const isSuper = !!user?.is_super;
   const { apiError, toast } = useUi();
   const [step, setStep] = useState(0);
   const [maxStep, setMaxStep] = useState(editing ? 5 : 0);
@@ -53,7 +54,9 @@ export default function ServerWizard({ network }: { network?: boolean }) {
     hostname: "", display_name: "", address: "", description: "", location: "", environment: "production",
     os_type: network ? "network" : "windows", os_version: "", device_type: network ? "network_device" : "server",
     monitoring_method: network ? "snmp" : "ncpa", host_check: network ? "ping" : "agent", group_ids: [], contact_group_ids: [],
-    template_id: null, check_interval: 5, retry_interval: 1, max_check_attempts: 5, notification_interval: 60,
+    template_id: null, location_id: user?.locations?.length === 1 && !user?.is_super ? user.locations[0].id : null,
+    company_id: user?.companies?.length === 1 && !user?.is_super ? user.companies[0].id : null,
+    check_interval: 5, retry_interval: 1, max_check_attempts: 5, notification_interval: 60,
     notifications_enabled: true, check_period: "24x7", notification_period: "24x7", is_enabled: true,
   });
   const [ncpa, setNcpa] = useState({ port: 5693, token: "", ssl_enabled: true, verify_ssl: false, timeout: 30 });
@@ -75,6 +78,9 @@ export default function ServerWizard({ network }: { network?: boolean }) {
   const cgroups = useQuery({ queryKey: ["contact-groups"], queryFn: () => api.get("/api/contact-groups") });
   const tps = useQuery({ queryKey: ["timeperiods"], queryFn: () => api.get("/api/timeperiods") });
   const settings = useQuery({ queryKey: ["settings"], queryFn: () => api.get("/api/settings") });
+  const locations = useQuery({ queryKey: ["locations"], queryFn: () => api.get("/api/locations") });
+  const companies = useQuery({ queryKey: ["companies"], queryFn: () => api.get("/api/companies") });
+  const siteLimited = !isSuper && (user?.locations?.length ?? 0) > 0;
   const existing = useQuery({ queryKey: ["server", id], queryFn: () => api.get(`/api/servers/${id}`), enabled: editing });
   const cat: any[] = catalog.data?.data ?? [];
   const catById = useMemo(() => Object.fromEntries(cat.map((c) => [c.id, c])), [cat]);
@@ -92,6 +98,7 @@ export default function ServerWizard({ network }: { network?: boolean }) {
       environment: s.environment, os_type: s.os_type, os_version: s.os_version ?? "", device_type: s.device_type,
       monitoring_method: s.monitoring_method, host_check: s.host_check, group_ids: s.groups.map((g: any) => g.id),
       contact_group_ids: s.contact_groups.map((g: any) => g.id), template_id: s.template_id, check_interval: s.check_interval,
+      location_id: s.location_id ?? null, company_id: s.company_id ?? null,
       retry_interval: s.retry_interval, max_check_attempts: s.max_check_attempts, notification_interval: s.notification_interval,
       notifications_enabled: s.notifications_enabled, check_period: s.check_period, notification_period: s.notification_period, is_enabled: s.is_enabled,
     });
@@ -138,6 +145,8 @@ export default function ServerWizard({ network }: { network?: boolean }) {
       if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/.test(f.hostname)) e.hostname = "1-63 characters: letters, digits, . _ - (start with a letter or digit)";
       if (!f.display_name.trim()) e.display_name = "Required";
       if (!f.address.trim()) e.address = "Required";
+      if (!isSuper && !f.company_id) e.company_id = "Choose the company this server belongs to";
+      if (siteLimited && !f.location_id) e.location_id = "Choose the location of this server";
     }
     if (s === 2) {
       if (f.monitoring_method === "ncpa" && !ncpa.token && !secretSet) e.token = "NCPA token is required";
@@ -187,7 +196,9 @@ export default function ServerWizard({ network }: { network?: boolean }) {
     for (let s = 0; s < 5; s++) if (!validateStep(s)) { setStep(s); return; }
     setSaving(action);
     const body: any = { ...f, action, description: f.description || null, location: f.location || null, os_version: f.os_version || null,
+      location_id: f.location_id ? Number(f.location_id) : null,
       services: items.map(({ key: _k, ...i }) => ({ ...i, warning: i.warning || null, critical: i.critical || null })) };
+    body.company_id = f.company_id ? Number(f.company_id) : null;
     if (f.monitoring_method === "ncpa") body.ncpa = { ...ncpa, token: ncpa.token || undefined };
     if (f.monitoring_method === "snmp") body.snmp = snmpPayload();
     if (f.monitoring_method === "nrpe") body.nrpe = nrpe;
@@ -231,7 +242,17 @@ export default function ServerWizard({ network }: { network?: boolean }) {
               <input className={`input ${errors.hostname ? "invalid" : ""}`} value={f.hostname} onChange={(e) => set("hostname", e.target.value.trim())} maxLength={63} autoFocus /></Field>
             <Field label="Display name" required error={errors.display_name}><input className="input" value={f.display_name} onChange={(e) => set("display_name", e.target.value)} maxLength={120} /></Field>
             <Field label="IP address / FQDN" required error={errors.address}><input className="input mono" value={f.address} onChange={(e) => set("address", e.target.value.trim())} maxLength={255} /></Field>
-            <Field label="Location" error={errors.location}><input className="input" value={f.location} onChange={(e) => set("location", e.target.value)} maxLength={120} placeholder="e.g. Head office DC, Rack 4" /></Field>
+            <Field label="Company" required={!isSuper} error={errors.company_id} hint={isSuper ? "Users see only servers of the companies assigned to them. Leave empty to keep it Super-Admin-only." : undefined}>
+              <select className={`input ${errors.company_id ? "invalid" : ""}`} value={f.company_id ?? ""} onChange={(e) => set("company_id", e.target.value ? Number(e.target.value) : null)}>
+                <option value="">{isSuper ? "- Not assigned -" : "- Choose -"}</option>
+                {(companies.data?.data ?? []).filter((c: any) => c.is_active || c.id === f.company_id).map((c: any) => <option key={c.id} value={c.id}>{c.name}{c.is_active ? "" : " (retired)"}</option>)}
+              </select></Field>
+            <Field label="Location (site)" required={siteLimited} error={errors.location_id}>
+              <select className={`input ${errors.location_id ? "invalid" : ""}`} value={f.location_id ?? ""} onChange={(e) => set("location_id", e.target.value ? Number(e.target.value) : null)}>
+                <option value="">{siteLimited ? "- Choose -" : "- Not assigned -"}</option>
+                {(locations.data?.data ?? []).filter((l: any) => l.is_active || l.id === f.location_id).map((l: any) => <option key={l.id} value={l.id}>{l.name}{l.is_active ? "" : " (retired)"}</option>)}
+              </select></Field>
+            <Field label="Rack / room" error={errors.location} hint="Optional detail, e.g. DC-1, Rack 4"><input className="input" value={f.location} onChange={(e) => set("location", e.target.value)} maxLength={120} placeholder="e.g. Server room, Rack 4" /></Field>
             <Field label="Environment" required><select className="input" value={f.environment} onChange={(e) => set("environment", e.target.value)}>{ENVIRONMENTS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</select></Field>
             <Field label="Description" error={errors.description}><input className="input" value={f.description} onChange={(e) => set("description", e.target.value)} maxLength={255} /></Field>
             <Field label="Host groups" span2 hint="Groups marked 'manual' are defined in your existing Nagios files.">
@@ -393,7 +414,9 @@ export default function ServerWizard({ network }: { network?: boolean }) {
               <dl className="dl">
                 <dt>Hostname</dt><dd><strong>{f.hostname}</strong></dd><dt>Display name</dt><dd>{f.display_name}</dd>
                 <dt>Address</dt><dd className="mono">{f.address}</dd><dt>Environment</dt><dd>{envLabel(f.environment)}</dd>
-                <dt>Location</dt><dd>{f.location || "-"}</dd><dt>Description</dt><dd>{f.description || "-"}</dd>
+                <dt>Location</dt><dd>{(locations.data?.data ?? []).find((l: any) => l.id === f.location_id)?.name ?? "Not assigned"}{f.location ? ` · ${f.location}` : ""}</dd>
+                <dt>Company</dt><dd>{(companies.data?.data ?? []).find((c: any) => c.id === f.company_id)?.name ?? "Not assigned"}</dd>
+                <dt>Description</dt><dd>{f.description || "-"}</dd>
                 <dt>Host groups</dt><dd>{(groups.data?.data ?? []).filter((g: any) => f.group_ids.includes(g.id)).map((g: any) => g.name).join(", ") || "-"}</dd>
                 <dt>Contact groups</dt><dd>{(cgroups.data?.data ?? []).filter((g: any) => f.contact_group_ids.includes(g.id)).map((g: any) => g.name).join(", ") || `(default: ${settings.data?.data?.default_contact_group ?? "admins"})`}</dd>
               </dl>
